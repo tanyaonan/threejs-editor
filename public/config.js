@@ -1,7 +1,10 @@
 window.editorJsons = [
     'editorJson/优雅永不过时.json',
+    'editorJson/动画时间线-追逐.json',
     'editorJson/地图.json',
+    'editorJson/动画时间线-旋律.json',
     'editorJson/优雅园区.json',
+    'editorJson/动画时间线-舞动.json',
     'editorJson/二维码.json',
     'editorJson/行政区.json',
     'editorJson/草原追逐.json',
@@ -47,12 +50,19 @@ window.editorJsons = [
     'editorJson/关爱地球.json',
 ]
 
+window.animateJsons = [
+    'animateJson/追逐.json',
+    'animateJson/旋律.json',
+]
+
+
 window.models = [
     'https://z2586300277.github.io/three-editor/dist/files/resource/datacenter.glb',
     'https://z2586300277.github.io/3d-file-server/files/model/elegant.glb',
     'https://z2586300277.github.io/3d-file-server/models/modern_city.glb',
     'https://z2586300277.github.io/3d-file-server/models/glb/computer.glb',
     'https://z2586300277.github.io/3d-file-server/models/glb/daodan.glb',
+    'https://z2586300277.github.io/3d-file-server/models/dance.glb',
     'https://z2586300277.github.io/3d-file-server/models/glb/feiji.glb',
     'https://z2586300277.github.io/3d-file-server/models/glb/gongren.glb',
     'https://z2586300277.github.io/3d-file-server/models/glb/leida.glb',
@@ -72,114 +82,5 @@ window.models = [
     'https://z2586300277.github.io/three-editor/dist/files/resource/shanghai.FBX',
 ]
 
-// 页脚链接配置
-window.footerLinks = {
-    right: [
-        { text: "🍂GitHub", url: "https://github.com/z2586300277/threejs-editor" },
 
-        { text: "🐸GoView集成", url: "https://z2586300277.github.io/go-view-three-editor" },
-        
-        { text: "⚡直接下载", url: "https://pan.quark.cn/s/1f507069e8f1" }
-        // { text: "⚡直接下载", url: "https://pan.baidu.com/s/1oECy2VqUmQeSl55DDdEnvw?pwd=bgue" }
-    ],
-    left: [
-        { text: "🍃开源案例", url: "https://z2586300277.github.io/three-cesium-examples" },
-
-        { text: "🍁新版文档", url: "https://z2586300277.github.io/editor-docs/" },
-
-        { text: "🍎新-测试版", url: "https://z2586300277.github.io/threejs-editor-beta" }
-    ]
-};
-
-const script = document.createElement('script');
-script.src = 'https://z2586300277.github.io/editorJson/v2.js';
-document.head.appendChild(script);
-
-// 版权信息
-window.copyright = "©2026 北京优悦幻光科技有限公司 All Rights Reserved.";
-
-// 创建dom - 精简版
-const readmeFn = function () {
-
-    if (localStorage.getItem('hide_author_info')) return
-
-    // 创建容器
-    const leftFooter = document.createElement('div');
-    leftFooter.className = 'footer-links left-footer';
-
-    const rightFooter = document.createElement('div');
-    rightFooter.className = 'footer-links right-footer';
-
-    const copyright = document.createElement('div');
-    copyright.className = 'copyright';
-    copyright.textContent = window.copyright;
-
-    // 生成链接
-    if (window.footerLinks.left) {
-        window.footerLinks.left.forEach(link => {
-            const a = document.createElement('a');
-            a.href = link.url;
-            a.target = '_blank';
-            a.textContent = link.text;
-            leftFooter.appendChild(a);
-        });
-    }
-
-    if (window.footerLinks.right) {
-        window.footerLinks.right.forEach(link => {
-            const a = document.createElement('a');
-            a.href = link.url;
-            a.target = '_blank';
-            a.textContent = link.text;
-            rightFooter.appendChild(a);
-        });
-    }
-
-    // 添加到页面
-    document.body.appendChild(leftFooter);
-    document.body.appendChild(rightFooter);
-    document.body.appendChild(copyright);
-
-    // 添加样式
-    const style = document.createElement('style');
-    style.textContent = `
-        .footer-links {
-            position: fixed;
-            bottom: 12px;
-            z-index: 1000;
-            display: flex;
-            gap: 12px;
-        }
-        
-        .left-footer { left: 10px; }
-        .right-footer { right: 10px; }
-        
-        .footer-links a {
-            color: #cbe3f9ff;
-            text-decoration: none;
-            font-size: 15px;
-            transition: all 0.3s;
-            padding: 5px 10px;
-            border-radius: 4px;
-        }
-        
-        .footer-links a:hover {
-            opacity: 1;
-            transform: translateY(-2px);
-        }
-        
-        .copyright {
-            position: fixed;
-            bottom: 5px;
-            left: 50%;
-            transform: translateX(-50%);
-            color: #888;
-            font-size: 12px;
-            z-index: 1000;
-        }
-    `;
-    document.head.appendChild(style);
-}
-
-window.onload = () => setTimeout(() => readmeFn(), 200)
 

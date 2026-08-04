@@ -51,27 +51,20 @@ export default defineConfig({
 
   resolve: {
 
-    alias: {
-
-      find: /^three$/,
-      
-      replacement: path.resolve(__dirname, 'node_modules/three')
-
-    }
+    alias: [
+      {
+        find: /^three$/,
+        replacement: path.resolve(__dirname, 'node_modules/three')
+      }
+    ]
 
   },
 
   base: './',
 
-  build: {
-
-    outDir: 'docs',
-
-  },
-
   server: {
 
-    port: 3002,
+    port: 5000,
 
     open: true,
 

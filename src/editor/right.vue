@@ -99,29 +99,38 @@
     <div class="scene-stats">
        <span>物体 {{ sceneStats.objects.toLocaleString() }}</span><span>顶点 {{ sceneStats.vertices.toLocaleString() }}</span><span>三角面 {{ sceneStats.triangles.toLocaleString() }}</span>
     </div>
-    <!-- 外部链接面板 -->
-    <div class="external-links">
-        <div class="control-group">
-            <div class="group-header">
-                <span class="group-title">快捷链接 <img src="https://visitor-badge.laobi.icu/badge?page_id=three_editor" > </span> 
-                <div class="divider"></div>
-            </div>
-            <div class="links-container">
-                <el-button v-for="link in externalLinks" :key="link.name" type="primary" plain size="small"
-                    class="link-button" @click="openLink(link.url)">
-                    <el-icon>
-                        <component :is="link.icon" />
-                    </el-icon>
-                    <span>{{ link.name }}</span>
+
+    <!-- 动画列表控制面板 -->
+    <div class="animation-list">
+        <div class="control-header">
+            <el-select v-model="selectedAnimation" placeholder="选择动画" class="set-select">
+                <el-option v-for="(anim, index) in animationList" :key="index" :label="anim.name" :value="anim.url" />
+            </el-select>
+            <div class="flex">
+                <el-button @click="applyAnimation" icon="VideoPlay" style="height:30px;width:60px" title="应用动画">
+                    应用
+                </el-button>
+                <el-button @click="clearAnimation" icon="Delete" style="height:30px;width:60px" title="清除动画">
+                    清除
                 </el-button>
             </div>
         </div>
+        <div v-for="(s, i) in sceneSheets" :key="i" style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;font-size:12px;">
+            <span style="color:#a8d4fd;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" :title="s.name">{{ s.name }}</span>
+            <div style="display:flex;gap:4px;">
+                <el-button size="small" :icon="VideoPlay" circle title="播放" @click="sheetPlay(i)" />
+                <el-button size="small" icon="VideoPause" circle title="暂停" @click="sheetPause(i)" />
+                <el-button size="small" icon="RefreshLeft" circle title="重置" @click="sheetReset(i)" />
+            </div>
+        </div>
     </div>
+    
+
 </template>
 
 <script setup>
 import { computed, reactive, ref, shallowReactive, watch } from 'vue'
-import { Grid, ScaleToOriginal, Histogram, View, Hide, Delete, ArrowRightBold, BrushFilled } from '@element-plus/icons-vue'
+import { Grid, ScaleToOriginal, Histogram, View, Hide, Delete, ArrowRightBold, BrushFilled, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 
 const sceneObjList = reactive([])
@@ -156,6 +165,10 @@ const datalist = reactive([
         url: 'https://z2586300277.github.io/three-editor/dist/files/scene/skyBox0/'
     },
     {
+        name: '晴天',
+        url: 'https://z2586300277.github.io/3d-file-server/files/sky/skyBox1/'
+    },
+    {
         name: '森林',
         url: 'https://z2586300277.github.io/three-editor/dist/files/scene/skyBox8/'
     },
@@ -163,6 +176,37 @@ const datalist = reactive([
 ])
 
 const getUrl = computed(() => datalist.find(i => i.name === selectedSet.value).url)
+
+const listJ = window.animateJsons.map(v => __isProduction__ ? '/threejs-editor-beta/' + v : '/' + v)
+// 动画列表
+const selectedAnimation = ref('')
+const animationList = computed(() => {
+    return listJ.map((url, index) => {
+        const name = url.split('/').pop().replace('.json', '')
+        return { name, url }
+    })
+})
+
+// 应用动画
+const applyAnimation = () => {
+    if (!selectedAnimation.value) return ElMessage.warning('请先选择动画')
+    fetch(selectedAnimation.value).then(res => res.json()).then(res => {
+        if (res) {
+            localStorage.removeItem('theatre-0.4.persistent')
+            localStorage.setItem('THREE_EDITOR_ANIMATIONS', JSON.stringify(res))
+            ElMessage.success('动画已应用')
+            setTimeout(() =>window.location.reload(), 1000);
+        }
+    })
+}
+
+// 清除动画
+const clearAnimation = () => {
+    localStorage.removeItem('theatre-0.4.persistent')
+    localStorage.removeItem('THREE_EDITOR_ANIMATIONS')
+    ElMessage.success('动画已清除')
+    setTimeout(() => window.location.reload(), 1000)
+}
 
 const setSky = (v) => {
     const set = datalist.find(i => i.name === v)
@@ -201,21 +245,6 @@ watch(pixelRatio, (val) => {
     }, 500);
 })
 
-// 外部链接数据
-const externalLinks = reactive([
-    { name: '素材库', url: 'https://z2586300277.github.io/3d-file-server/link.html', icon: 'Collection' },
-    { name: 'Npm内核', url: 'https://www.npmjs.com/package/three-edit-cores', icon: 'Box' },
-    { name: 'B站', url: 'https://space.bilibili.com/245165721' , icon: 'ChatDotRound' },
-    { name: '交流群', url: 'https://z2586300277.github.io/personalCode.html', icon: 'Document' },
-    { name: '定制开发', url: 'https://www.goofish.com/personal?userId=2885508577', icon: 'Promotion' },
-    { name: '赞赏', url: 'https://z2586300277.github.io/sponsor.html', icon: 'StarFilled' },
-])
-
-// 打开外部链接
-const openLink = (url) => {
-    window.open(url, '_blank')
-}
-
 const logbuffer = ref(true)
 if (localStorage.getItem('new_threeEditor_logBuffer') === 'false') logbuffer.value = false
 watch(logbuffer, (val) => {
@@ -232,6 +261,7 @@ defineExpose({
     },
     startEditor(te) {
         const { scene } = te
+        loadSceneAnimations(te)
         const push_obj = args => {
             args.map(obj => {
              ['PerspectiveCamera','AxesHelper','GridHelper','Box3Helper'].indexOf(obj.type) === -1 && sceneObjList.unshift(obj)
@@ -272,6 +302,35 @@ function selectObj(item) {
     catch (error) {}
 }
 
+const sceneSheets = ref([])
+let _sheetsRaw = []
+
+function loadSceneAnimations(t) {
+    const { scene } = t
+    scene.SET_STORAGE_CALL = () => {
+        const { studio } = t.other.animateEditor
+        const sheets = studio.studioProject.sheets
+        _sheetsRaw = []
+        Object.keys(sheets).forEach(k => {
+            const s = sheets[k]
+            _sheetsRaw.push({ name: s.name || k, sequence: s.sequence })
+        })
+        sceneSheets.value = _sheetsRaw.map(s => ({ name: s.name }))
+    }
+    scene.SET_STORAGE_CALL()
+}
+
+function sheetPlay(i) {
+    _sheetsRaw[i]?.sequence.play({ iterationCount: Infinity })
+}
+function sheetPause(i) {
+    _sheetsRaw[i]?.sequence.pause()
+}
+function sheetReset(i) {
+    const seq = _sheetsRaw[i]?.sequence
+    if (seq) { seq.pause(); seq.position = 0 }
+}
+
 function delI(item) {
     const i = threeEditor.scene.children.find(c => c.id === item.id)
     threeEditor.scene.remove(i)
@@ -306,6 +365,16 @@ function clear() {
     gap: 5px;
     padding: 0px 10px 0px 10px;
     box-sizing: border-box;
+}
+
+.animation-list {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 0px 10px 10px 10px;
+    box-sizing: border-box;
+    margin-top: 10px;
 }
 
 .control-header {
@@ -400,32 +469,6 @@ function clear() {
         color: #e5eaf3;
         font-size: 14px;
     }
-}
-
-.external-links {
-    // margin-top: 20px;
-    width: 100%;
-    padding: 0 10px;
-    box-sizing: border-box;
-}
-
-.links-container {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-top: 10px;
-}
-
-.link-button {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    border-radius: 6px;
-    background-color: rgba(50, 50, 60, 0.5);
-    border: 1px solid rgba(168, 212, 253, 0.3);
-    transition: all 0.3s;
-    flex: 1;
-    min-width: 100px;
 }
 
 .scene-tree {

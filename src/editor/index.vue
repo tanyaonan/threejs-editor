@@ -37,18 +37,8 @@
           </el-dialog>
         </div>
         <div class="title">
-          <el-link style="font-size: 16px;"
-            @click="openUrl('https://z2586300277.github.io/')">🏠官网</el-link>&nbsp;&nbsp;
-          <el-link style="font-size: 16px;"
-            @click="openUrl('https://z2586300277.github.io/three-editor/dist/#/editor')">🍁旧编辑器</el-link>&nbsp;&nbsp;
-          - &nbsp;
           <img class="logo" src="/site.png" alt="logo" width="18px" height="18px">
-          &nbsp;{{ dataCores.sceneName || ' - - - - ' }}&nbsp;-&nbsp;&nbsp;
-          <el-link @click="openUrl('https://z2586300277.github.io/threejs-editor/apply.html')"
-            style="font-size: 16px;">🌾嵌入项目</el-link>
-            &nbsp;&nbsp;
-              <el-link @click="openUrl('https://github.com/z2586300277/threejs-editor/tree/main/src/editor/compoents')"
-            style="font-size: 16px;">🌳组件</el-link>
+          &nbsp;{{ dataCores.sceneName || ' - - - - ' }}
         </div>
         <div class="header-right">
           <el-button class="btn-add" link icon="Upload" @click="loadModelUrl">线上导入</el-button>
@@ -215,7 +205,7 @@ if(route.query?.undark) document.getElementsByTagName('html')[0].classList.remov
 if (route.query.sceneName) {
     namePreviewScene = true
     const sn = 'editorJson/' + route.query.sceneName + '.json'
-    window.editorPreviewSceneUrl = __isProduction__ ? '/threejs-editor/' + sn : '/' + sn
+    window.editorPreviewSceneUrl = __isProduction__ ? '/threejs-editor-beta/' + sn : '/' + sn
     
     const local_addon = localStorage.getItem('newEditor_addon_editor_json')
     if(local_addon) {
@@ -239,8 +229,6 @@ const dataCores = reactive({
   sceneName: localStorage.getItem('new_sceneName') || '三维测试',
   options: JSON.parse(localStorage.getItem('new_sceneList')) || [{ name: '三维测试' }]
 })
-
-const openUrl = (url) => window.open(url, '_blank')
 
 watch(selectChildMode, (val) => threeEditor.handler.selectChildEnabled = val)
 watch(rightClickMenusEnable, (val) => threeEditor.handler.rightClickMenusEnable = val)

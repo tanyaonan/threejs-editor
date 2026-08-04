@@ -25,3 +25,5 @@ cache
 *.sw?
 *.yaml
 .mcp.json
+.claude
+.cursor
