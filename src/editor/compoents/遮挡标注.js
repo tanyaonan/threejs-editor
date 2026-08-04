@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 const STYLE_ID = 'occlusion-label-popup-v2-style';
-const DEFAULT_IMAGE = 'https://z2586300277.github.io/site.png';
+const DEFAULT_IMAGE = '/site.png';
 
 function ensurePopupStyle() {
     if (document.getElementById(STYLE_ID)) return;

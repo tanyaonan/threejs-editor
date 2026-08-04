@@ -13,7 +13,7 @@ export default {
             render() {
 
                 const slides = [
-                    { name: '优雅永不过时', url: 'https://z2586300277.github.io/site.png' },
+                    { name: '优雅永不过时', url: '/site.png' },
                     { name: '低代码编辑器', url: 'https://z2586300277.github.io/3d-file-server/images/editor.jpg' },
                     { name: '开源案例', url: 'https://z2586300277.github.io/3d-file-server/images/threeCesiumExamples.jpg' },
                 ];

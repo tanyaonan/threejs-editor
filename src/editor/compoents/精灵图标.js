@@ -7,7 +7,7 @@ export default {
         const group = new THREE.Group();
         group.name = '精灵图标';
 
-        const arr = ['https://z2586300277.github.io/three-cesium-examples/files/author/nmxg.jpg', 'https://z2586300277.github.io/site.png', 'https://z2586300277.github.io/three-cesium-examples/files/author/flowers-10.jpg']
+        const arr = ['https://z2586300277.github.io/three-cesium-examples/files/author/nmxg.jpg', '/site.png', 'https://z2586300277.github.io/three-cesium-examples/files/author/flowers-10.jpg']
         let IMAGE_URL = arr[Math.floor(Math.random() * arr.length)];
         if (storage?.url) IMAGE_URL = storage.url;
         group.url = IMAGE_URL;
