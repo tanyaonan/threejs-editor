@@ -311,8 +311,8 @@ const dragAdd = (e, v) => {
 
 .content-panel {
   flex: 1;
-  height: calc(100% - 40px);
-  overflow: auto;
+  height: 100%;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
@@ -329,8 +329,8 @@ const dragAdd = (e, v) => {
   display: grid;
   grid-auto-rows: 80px;
   grid-template-columns: repeat(2, 1fr);
-  overflow: scroll;
-  height: 100%;
+  overflow: auto;
+  flex: 1;
   justify-items: center;
   width: 100%;
 
