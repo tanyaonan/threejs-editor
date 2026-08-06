@@ -132,6 +132,7 @@
 import { computed, reactive, ref, shallowReactive, watch } from 'vue'
 import { Grid, ScaleToOriginal, Histogram, View, Hide, Delete, ArrowRightBold, BrushFilled, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
+import { isEmbedMode } from '../embed/bridge'
 
 const sceneObjList = reactive([])
 const editingId = ref(null)
@@ -177,7 +178,7 @@ const datalist = reactive([
 
 const getUrl = computed(() => datalist.find(i => i.name === selectedSet.value).url)
 
-const listJ = window.animateJsons.map(v => __isProduction__ ? '/threejs-editor-beta/' + v : '/' + v)
+const listJ = window.animateJsons.map(v => import.meta.env.BASE_URL + v)
 // 动画列表
 const selectedAnimation = ref('')
 const animationList = computed(() => {
@@ -189,6 +190,7 @@ const animationList = computed(() => {
 
 // 应用动画
 const applyAnimation = () => {
+    if (isEmbedMode()) return ElMessage.info('嵌入模式暂不支持切换动画时间线')
     if (!selectedAnimation.value) return ElMessage.warning('请先选择动画')
     fetch(selectedAnimation.value).then(res => res.json()).then(res => {
         if (res) {
@@ -202,6 +204,7 @@ const applyAnimation = () => {
 
 // 清除动画
 const clearAnimation = () => {
+    if (isEmbedMode()) return ElMessage.info('嵌入模式暂不支持动画时间线')
     localStorage.removeItem('theatre-0.4.persistent')
     localStorage.removeItem('THREE_EDITOR_ANIMATIONS')
     ElMessage.success('动画已清除')
@@ -239,6 +242,11 @@ const toggleAxes = (val) => {
 const pixelRatio = ref(1)
 if (localStorage.getItem('new_threeEditor_pixelRatio')) pixelRatio.value = parseFloat(localStorage.getItem('new_threeEditor_pixelRatio'))
 watch(pixelRatio, (val) => {
+    // 嵌入模式：直接应用到渲染器，不写 localStorage、不重载页面
+    if (isEmbedMode()) {
+        try { threeEditor?.renderer?.setPixelRatio?.(window.devicePixelRatio * val) } catch (e) {}
+        return
+    }
     localStorage.setItem('new_threeEditor_pixelRatio', val)
     setTimeout(() => {
         window.location.reload()
@@ -248,6 +256,7 @@ watch(pixelRatio, (val) => {
 const logbuffer = ref(true)
 if (localStorage.getItem('new_threeEditor_logBuffer') === 'false') logbuffer.value = false
 watch(logbuffer, (val) => {
+    if (isEmbedMode()) return // 嵌入模式：不写 localStorage、不重载页面
     localStorage.setItem('new_threeEditor_logBuffer', val)
     setTimeout(() => {
         window.location.reload()
@@ -337,6 +346,7 @@ function delI(item) {
 }
 
 function clear() {
+    if (isEmbedMode()) return ElMessage.info('嵌入模式不支持清理缓存')
     ElMessageBox.confirm('确定要清理所有缓存吗？这将清除浏览器存储的 localStorage、sessionStorage 和 IndexedDB 数据，页面将自动刷新。', '清理缓存', {
         confirmButtonText: '确定',
         cancelButtonText: '取消',

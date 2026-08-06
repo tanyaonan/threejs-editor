@@ -37,8 +37,14 @@
           </el-dialog>
         </div>
         <div class="title">
-          <img class="logo" src="/site.png" alt="logo" width="18px" height="18px">
-          &nbsp;{{ dataCores.sceneName || ' - - - - ' }}
+          <template v-if="isEmbedMode()">
+            <!-- 嵌入模式：标题取宿主传入的页面标题，不带 logo 图标 -->
+            {{ embedTitle || '三维场景设计' }}
+          </template>
+          <template v-else>
+            <img class="logo" src="/site.png" alt="logo" width="18px" height="18px">
+            &nbsp;{{ dataCores.sceneName || ' - - - - ' }}
+          </template>
         </div>
         <div class="header-right">
           <el-button class="btn-add" link icon="Upload" @click="loadModelUrl">线上导入</el-button>
@@ -173,18 +179,16 @@
   </div>
 
   <Editor @dblclick="getEvent" :dataCores="dataCores" @emitThreeEditor="emitThreeEditor" class="editor" />
-  <AiPanel v-show="!previewScene" />
 </template>
 
 <script setup>
-import { defineAsyncComponent, reactive, ref, watch } from 'vue'
+import { defineAsyncComponent, reactive, ref, watch, onMounted } from 'vue'
 import EditorVue from './editor.vue'
 import { ElButton, ElSelect, ElOption, ElMessage, ElIcon, ElMessageBox } from 'element-plus'
 import { Pointer, Position, RefreshRight, ZoomIn, Remove, Refresh } from '@element-plus/icons-vue'
 import LeftPanel from './left.vue'
 import RightPanel from './right.vue'
-import AiPanel from './ai/aiPanel.vue'
-import { mountSceneAI } from './ai/ai'
+import { isEmbedMode, initEmbedBridge, setupEmbedEditor, getEmbedTitle, onEmbedTitleChange } from '../embed/bridge'
 import { useRoute, useRouter } from 'vue-router'
 import { setIndexDB } from './indexDb'
 import { getObjectViews, createGsapAnimation, restoreHistoryHandler } from './lib'
@@ -203,12 +207,25 @@ const Editor = defineAsyncComponent(() => {
 
 const route = useRoute()
 const router = useRouter()
+
+// iframe 嵌入模式（?embed=1）：初始化宿主消息桥
+if (isEmbedMode()) onMounted(() => initEmbedBridge())
+
+// 嵌入模式顶栏标题：取宿主 rup:init 传入的页面标题，并跟随后续变化
+const embedTitle = ref('')
+if (isEmbedMode()) {
+  embedTitle.value = getEmbedTitle()
+  onEmbedTitleChange((title) => {
+    embedTitle.value = title
+  })
+}
+
 let namePreviewScene = false
 if(route.query?.undark) document.getElementsByTagName('html')[0].classList.remove('dark')
 if (route.query.sceneName) {
     namePreviewScene = true
     const sn = 'editorJson/' + route.query.sceneName + '.json'
-    window.editorPreviewSceneUrl = __isProduction__ ? '/threejs-editor-beta/' + sn : '/' + sn
+    window.editorPreviewSceneUrl = import.meta.env.BASE_URL + sn
     
     const local_addon = localStorage.getItem('newEditor_addon_editor_json')
     if(local_addon) {
@@ -269,7 +286,7 @@ const emitThreeEditor = (threeEditor) => {
   rightPanel.value.helperConf(threeEditor)
   rightPanel.value.startEditor(threeEditor)
   window.threeEditor = threeEditor
-  mountSceneAI(threeEditor)
+  setupEmbedEditor(threeEditor)
 
   // 轮询 handler 状态，值变化时才同步到工具栏 Vue ref
   const tcModeMap = { translate: '平移', rotate: '旋转', scale: '缩放' }
@@ -287,6 +304,7 @@ const emitThreeEditor = (threeEditor) => {
 }
 
 function saveLocal() {
+  if (isEmbedMode()) return // 嵌入模式：场景仅来自宿主消息/内存，不写 localStorage
   localStorage.setItem('new_sceneList', JSON.stringify(dataCores.options))
   localStorage.setItem('new_sceneName', dataCores.sceneName)
 }
@@ -330,6 +348,12 @@ function pict() {
 }
 
 function saveScene() {
+  if (isEmbedMode()) {
+    // 嵌入模式：通知宿主保存，场景由宿主统一持久化
+    parent.postMessage({ type: 'rup:save' }, '*')
+    ElMessage.success('保存成功')
+    return
+  }
   if (dataCores.options.find(item => item.name === dataCores.sceneName)) localStorage.setItem(dataCores.sceneName + '-newEditor', JSON.stringify(threeEditor.saveSceneEdit()))
   else dataCores.sceneName = ''
   ElMessage.success('保存成功')

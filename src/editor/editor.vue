@@ -6,8 +6,9 @@
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import tamplateJson from './template.json'
 import { ThreeEditor } from './lib'
+import { isEmbedMode, getEmbedScene } from '../embed/bridge'
 
-ThreeEditor.dracoPath = __isProduction__ ? '/threejs-editor-beta/draco/' : '/draco/'
+ThreeEditor.dracoPath = import.meta.env.BASE_URL + 'draco/'
 
 // 初始渲染动画数据
 const THREE_EDITOR_ANIMATIONS = localStorage.getItem('THREE_EDITOR_ANIMATIONS')
@@ -23,6 +24,7 @@ const { dataCores } = defineProps(['dataCores'])
 const emits = defineEmits(['emitThreeEditor'])
 
 watch(() => dataCores.sceneName, (val) => {
+    if (isEmbedMode()) return // 嵌入模式：场景切换仅由宿主消息（rup:set-scene）驱动
 
     let params = localStorage.getItem(val + '-newEditor')
     params = JSON.parse(params) || tamplateJson
@@ -40,12 +42,19 @@ async function init() {
 
     try {
         
-        let sceneParams = JSON.parse(localStorage.getItem(dataCores.sceneName + '-newEditor')) || tamplateJson
-        if (window.editorPreviewSceneUrl) {
-            try {
-                const res = await fetch(window.editorPreviewSceneUrl).then(res => res.json())
-                if(res) sceneParams = res
-            } catch (error) {}
+        let sceneParams = tamplateJson
+        if (isEmbedMode()) {
+            // 嵌入模式：跳过 localStorage，场景仅来自宿主消息
+            const embedScene = getEmbedScene()
+            if (embedScene) sceneParams = embedScene.state || embedScene
+        } else {
+            sceneParams = JSON.parse(localStorage.getItem(dataCores.sceneName + '-newEditor')) || tamplateJson
+            if (window.editorPreviewSceneUrl) {
+                try {
+                    const res = await fetch(window.editorPreviewSceneUrl).then(res => res.json())
+                    if(res) sceneParams = res
+                } catch (error) {}
+            }
         }
 
         let logarithmicDepthBuffer = true

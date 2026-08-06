@@ -30,6 +30,7 @@ import { ref, computed } from 'vue';
 import { ThreeEditor, getObjectViews, createGsapAnimation } from './lib'
 import * as THREE from 'three';
 import { ElMessage } from 'element-plus';
+import { isEmbedMode } from '../embed/bridge';
 
 ThreeEditor.__GLSLLIB__.push(
        {
@@ -115,7 +116,7 @@ else {
   const local_addon = localStorage.getItem('newEditor_addon_editor_json')
   if(local_addon) addList = JSON.parse(local_addon)
 }
-const listJ = window.editorJsons.map(v => __isProduction__ ? '/threejs-editor-beta/' + v : '/' + v)
+const listJ = window.editorJsons.map(v => import.meta.env.BASE_URL + v)
 listJ.splice(9, 0, ...addList)
 const lightTypes = ['环境光', '平行光', '点光源', '聚光灯', '半球光', '平面光'];
 const data = [
@@ -163,6 +164,7 @@ function setActive(item) {
 let current_scene_url = localStorage.getItem('current_scene_url')
 const loadScene = async (v) => {
   if(v.indexOf('动画时间线') > -1) {
+    if (isEmbedMode()) return ElMessage.info('嵌入模式暂不支持动画时间线')
     let str = v 
     const newUrl = str.replace('/editorJson/', '/animateJson/').replace(/动画时间线-/g, '')
     if(current_scene_url!==newUrl) {
