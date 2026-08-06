@@ -52,7 +52,8 @@
           <el-button class="btn-add" link icon="download" @click="exportGLTF">导出</el-button>
           <el-button @click="pict" icon="camera"></el-button>
           <el-button @click="openPanel">控制板</el-button>
-          <el-button @click="saveScene">保存</el-button>
+          <!-- 嵌入模式：保存由宿主统一处理（外部保存按钮），此处隐藏避免重复保存入口 -->
+          <el-button v-if="!isEmbedMode()" @click="saveScene">保存</el-button>
         </div>
       </div>
     </div>

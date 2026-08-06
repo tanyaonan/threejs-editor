@@ -86,6 +86,28 @@ const LIGHT_ITEM_SKELETON = {
   layers: { mask: 1 },
 }
 
+/**
+ * 颜色归一化：设计器回写（saveSceneEdit）的材质/灯光颜色可能是 THREE.Color 对象
+ * （{isColor:true, r, g, b}，分量 0-1），three-edit-cores 解析时按数字处理，对象会导致颜色变黑。
+ * 统一转为十进制数字（0xRRGGBB）。
+ */
+function normalizeColorValue(value) {
+  if (value && typeof value === 'object' && typeof value.r === 'number' && typeof value.g === 'number' && typeof value.b === 'number') {
+    const r = Math.max(0, Math.min(1, value.r))
+    const g = Math.max(0, Math.min(1, value.g))
+    const b = Math.max(0, Math.min(1, value.b))
+    return (Math.round(r * 255) << 16) + (Math.round(g * 255) << 8) + Math.round(b * 255)
+  }
+  return value
+}
+
+/** 归一化材质颜色（color/emissive 等 Color 字段） */
+function normalizeMaterialColors(mat) {
+  if (!mat || typeof mat !== 'object') return
+  if (mat.color !== undefined) mat.color = normalizeColorValue(mat.color)
+  if (mat.emissive !== undefined) mat.emissive = normalizeColorValue(mat.emissive)
+}
+
 /** 基础几何体条目骨架（提炼自编辑器官方场景结构）。material 字段缺失会导致渲染器不绘制（tris 0） */
 const INNER_CORE_SKELETON = {
   renderOrder: 0,
@@ -152,10 +174,17 @@ function normalizeSceneState(state) {
       if (item.rotation === undefined) item.rotation = { x: 0, y: 0, z: 0 }
       if (item.scale === undefined) item.scale = { x: 1, y: 1, z: 1 }
       if (tplItem) deepFill(item, tplItem)
+      // 颜色归一化：设计器回写的颜色可能是 THREE.Color 对象（isColor），转十进制数字避免变黑
+      if (key === 'lightCores' && item.color !== undefined) {
+        item.color = normalizeColorValue(item.color)
+      }
+      if (item.material && typeof item.material === 'object') {
+        normalizeMaterialColors(item.material)
+      }
       // 灯光条目额外补 target/shadow（模板默认灯光是精简 AmbientLight，DirectionalLight/SpotLight 必读这些字段）
       if (key === 'lightCores') {
-        // AmbientLight/HemisphereLight 没有 shadow 对象，带 shadow 字段会导致核心设置 shadow.bias 崩溃
-        if (item.type === 'AmbientLight' || item.type === 'HemisphereLight') {
+        // AmbientLight/HemisphereLight/RectAreaLight 没有 shadow 对象，带 shadow 字段会导致核心设置 shadow.bias 崩溃
+        if (item.type === 'AmbientLight' || item.type === 'HemisphereLight' || item.type === 'RectAreaLight') {
           delete item.shadow
         } else {
           deepFill(item, LIGHT_ITEM_SKELETON)
