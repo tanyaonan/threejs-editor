@@ -15,8 +15,9 @@
       <div class="build">
         <div class="back" v-for="i in filteredList">
           <div class="item" draggable="true" @dragend="e => dragAdd(e, i)">
-            <el-link @click="clickLeft(i)">
-              {{ i.split('/').pop() }}
+            <el-link @click="clickLeft(i)" class="list-item">
+              <img v-if="i.preview" :src="i.preview" class="preview-img" alt="" />
+              <span class="item-name">{{ i.name }}</span>
             </el-link>
           </div>
         </div>
@@ -116,8 +117,10 @@ else {
   const local_addon = localStorage.getItem('newEditor_addon_editor_json')
   if(local_addon) addList = JSON.parse(local_addon)
 }
-const listJ = window.editorJsons.map(v => import.meta.env.BASE_URL + v)
-listJ.splice(9, 0, ...addList)
+const baseUrl = import.meta.env.BASE_URL
+const stripExt = (s) => s.split('/').pop().replace(/\.(json|glb|fbx)$/i, '')
+const listJ = window.editorJsons.map(v => ({ name: stripExt(v), url: baseUrl + v }))
+listJ.splice(9, 0, ...addList.map(v => ({ name: stripExt(v), url: v })))
 const lightTypes = ['环境光', '平行光', '点光源', '聚光灯', '半球光', '平面光'];
 const data = [
   {
@@ -128,17 +131,17 @@ const data = [
   {
     icon: 'office-building',
     title: '模型',
-    list: window.models,
+    list: window.models.map(m => ({ ...m, preview: m.preview ? baseUrl + m.preview : null })),
   },
   {
     title: '灯光',
     icon: 'sunny',
-    list: lightTypes
+    list: lightTypes.map(name => ({ name, url: name }))
   },
   {
     title: '组件',
     icon: 'connection',
-    list: editor_components
+    list: editor_components.map(name => ({ name, url: name }))
   }
 ];
 
@@ -150,7 +153,7 @@ const searchText = ref('');
 const filteredList = computed(() => {
   if (!searchText.value) return showList.value;
   return showList.value.filter(item =>
-    item.split('/').pop().toLowerCase().includes(searchText.value.toLowerCase())
+    String(item.name).toLowerCase().includes(searchText.value.toLowerCase())
   );
 });
 
@@ -196,13 +199,13 @@ const loadModel = (url, point) => {
 window.left_loadModel = loadModel
 async function clickLeft(v, point) {
   if (active.value === '配置案例') {
-    window.currentOnlineSceneName = v.split('/').pop().replace('.json', '')
-    loadScene(v)
+    window.currentOnlineSceneName = v.name
+    loadScene(v.url)
   }
-  else if (active.value === '模型') loadModel(v, point)
+  else if (active.value === '模型') loadModel(v.url, point)
   else if (active.value === '组件') {
     const { scene, transformControls } = threeEditor
-    const design = ThreeEditor.__DESIGNS__.find(d => d.label === v)
+    const design = ThreeEditor.__DESIGNS__.find(d => d.label === v.name)
     const mesh = await design.create(null, threeEditor, threeEditor)
     if (!mesh) return
     mesh.editorType = 'isDesignMesh'
@@ -227,10 +230,10 @@ async function clickLeft(v, point) {
       '半球光': () => new THREE.HemisphereLight(0xffffff, 0x000000, 1),
       '平面光': () => new THREE.RectAreaLight(0xffffff, 1, 100, 100),
     }
-    const light = lightMap[v]()
+    const light = lightMap[v.name]()
     if (light.target) scene.add(light.target)
     light.editorType = 'isLight'
-    light.name = v
+    light.name = v.name
     if (point) light.position.copy(point)
     scene.add(light)
     transformControls.attach(light)
@@ -364,5 +367,30 @@ const dragAdd = (e, v) => {
     padding: 4px;  box-sizing: border-box;
   }
 
+  .list-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .preview-img {
+    width: 44px;
+    height: 44px;
+    object-fit: contain;
+    flex-shrink: 0;
+  }
+
+  .item-name {
+    font-size: 12px;
+    line-height: 1.2;
+    word-break: break-all;
+    text-align: center;
+    max-width: 100%;
+  }
 }
 </style>
