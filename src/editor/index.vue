@@ -4,6 +4,8 @@
     <div class="header" v-show="!previewScene">
       <div class="header-box">
         <div class="header-left">
+          <!-- 顶部：场景下拉框 / 新建场景 / 本地导入（暂注释，后续恢复） -->
+          <!--
           <el-select v-model="dataCores.sceneName" class="m-2" placeholder="场景" size="large" style="width: 200px">
             <el-option v-for="item in dataCores.options" :key="item.name" :label="item.name" :value="item.name"
               style="color:rgb(255, 255, 255)">
@@ -35,6 +37,7 @@
               </div>
             </template>
           </el-dialog>
+          -->
         </div>
         <div class="title">
           <template v-if="isEmbedMode()">
@@ -47,8 +50,11 @@
           </template>
         </div>
         <div class="header-right">
+          <!-- 线上导入 / 模板（暂注释，后续恢复） -->
+          <!--
           <el-button class="btn-add" link icon="Upload" @click="loadModelUrl">线上导入</el-button>
           <el-button class="btn-add" link icon="Document" @click="exportTemplateJson">模板</el-button>
+          -->
           <el-button class="btn-add" link icon="download" @click="exportGLTF">导出</el-button>
           <el-button @click="pict" icon="camera"></el-button>
           <el-button @click="openPanel">控制板</el-button>
@@ -131,6 +137,8 @@
     </div>
 
     <div class="bot">
+      <!-- 底部控制面板 control-panel（暂注释，后续恢复） -->
+      <!--
       <div class="control-panel">
         <div class="switches-container">
           <div class="switch-item">
@@ -176,6 +184,7 @@
           </div>
         </div>
       </div>
+      -->
     </div>
   </div>
 
