@@ -18,6 +18,21 @@ import templateJson from '../editor/template.json'
 import * as THREE from 'three'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
+// 共享渲染核心（与页面渲染器 scene-3d viewer 同一渲染源，见 render-core.js 头注释）：
+// 纹理系统/世界尺度 UV/几何与材质构建/有机形变/阴影调优 全部在此，双端行为永远一致
+import {
+  SURFACE_UNIT,
+  ROUND_BOX_MAX,
+  getSurfaceTextures,
+  inferSurfaceKind,
+  inferOrganicKind,
+  nameJitter,
+  applyBoxWorldUV,
+  applyPlaneWorldUV,
+  applyCylinderWorldUV,
+  isSlimColumn,
+  displaceOrganicGeometry,
+} from './render-core.js'
 
 const parseQuery = () => {
   const params = new URLSearchParams(window.location.search)
@@ -43,6 +58,7 @@ let watchTimer = null
 let changeTimer = null
 let embedTitle = '' // 宿主传入的页面标题（嵌入模式顶栏显示）
 let titleListener = null // 标题变化回调（index.vue 绑定响应式 ref）
+let strippedTubeGeometries = [] // 加载时剥离的 TubeGeometry 原始条目（three-edit-cores 无法解析，保存时合并回保持无损）
 
 function post(type, payload, requestId) {
   const msg = { type }
@@ -90,18 +106,49 @@ const LIGHT_ITEM_SKELETON = {
 }
 
 /**
- * 颜色归一化：设计器回写（saveSceneEdit）的材质/灯光颜色可能是 THREE.Color 对象
+ * 颜色归一化（加载侧）：设计器回写（saveSceneEdit）的材质/灯光颜色可能是 THREE.Color 对象
  * （{isColor:true, r, g, b}，分量 0-1），three-edit-cores 解析时按数字处理，对象会导致颜色变黑。
  * 统一转为十进制数字（0xRRGGBB）。
+ * 注意：three r152+ 启用 ColorManagement 后 THREE.Color 内部存储的是**线性空间**分量——
+ * 直接把线性分量 ×255 当 sRGB 十进制，会让颜色每次保存/加载循环累积变暗（0.91→0.82→0.65…）。
+ * 正确做法：new THREE.Color(线性分量) → getHex()（内部做线性→sRGB 转换），与原始 sRGB 十进制一致。
  */
 function normalizeColorValue(value) {
   if (value && typeof value === 'object' && typeof value.r === 'number' && typeof value.g === 'number' && typeof value.b === 'number') {
-    const r = Math.max(0, Math.min(1, value.r))
-    const g = Math.max(0, Math.min(1, value.g))
-    const b = Math.max(0, Math.min(1, value.b))
-    return (Math.round(r * 255) << 16) + (Math.round(g * 255) << 8) + Math.round(b * 255)
+    try {
+      return new THREE.Color(value.r, value.g, value.b).getHex()
+    } catch (e) {
+      const r = Math.max(0, Math.min(1, value.r))
+      const g = Math.max(0, Math.min(1, value.g))
+      const b = Math.max(0, Math.min(1, value.b))
+      return (Math.round(r * 255) << 16) + (Math.round(g * 255) << 8) + Math.round(b * 255)
+    }
   }
   return value
+}
+
+/** 序列化后的场景 state 颜色归一化（保存侧）：three-edit-cores 输出 isColor 线性对象 →
+ * 转回 sRGB 十进制（与页面 viewer 的 setHex 语义一致），防止线性分量泄漏进 JSON、
+ * 以及加载侧把线性值当 sRGB 导致的逐次累积变暗。十进制数字保持不变（幂等）。 */
+function normalizeSerializedColors(state) {
+  if (!state || typeof state !== 'object') return state
+  try {
+    const fix = (v) => (v && typeof v === 'object' && typeof v.r === 'number' && typeof v.g === 'number' && typeof v.b === 'number'
+      ? new THREE.Color(v.r, v.g, v.b).getHex()
+      : v)
+    for (const list of [state.innerCores, state.lightCores]) {
+      if (!Array.isArray(list)) continue
+      for (const item of list) {
+        if (!item || typeof item !== 'object') continue
+        if (item.material && typeof item.material === 'object') {
+          if (item.material.color !== undefined) item.material.color = fix(item.material.color)
+          if (item.material.emissive !== undefined) item.material.emissive = fix(item.material.emissive)
+        }
+        if (item.color !== undefined) item.color = fix(item.color)
+      }
+    }
+  } catch (e) {}
+  return state
 }
 
 /** 归一化材质颜色（color/emissive 等 Color 字段） */
@@ -167,6 +214,27 @@ function normalizeSceneState(state) {
   for (const key of ['lightCores', 'innerCores', 'modelCores', 'drawCores', 'textCores', 'particleCores', 'designCores']) {
     const list = state[key]
     if (!Array.isArray(list)) continue
+    // 防御：three-edit-cores 的 innerCores 用 new THREE[type](...Object.values(parameters)) 创建，
+    // TubeGeometry 的 path 必须是 Curve 实例，纯 JSON 数组无法解析（抛 "path.computeFrenetFrames is not a function"），
+    // 且其 setStorage forEach 无 try/catch——单个条目抛错会中断后续全部对象创建（楼栋等主体不显示）。
+    // 剥离该类条目：设计器不渲染曲线对象（页面渲染由 scene-3d viewer 自行支持，不受影响），其余对象正常加载；
+    // 原始条目暂存，wrapScene 保存时合并回（无损）。
+    if (key === 'innerCores') {
+      const dropped = []
+      for (let i = list.length - 1; i >= 0; i--) {
+        const it = list[i]
+        if (it && it.geometry && it.geometry.type === 'TubeGeometry') {
+          dropped.push(it)
+          list.splice(i, 1)
+        }
+      }
+      if (dropped.length) {
+        strippedTubeGeometries = dropped
+        console.warn('[bridge] 剥离 three-edit-cores 不支持的 TubeGeometry 条目（设计器不显示，保存时保留）：', dropped.map((d) => d.name || 'TubeGeometry').join(', '))
+      } else {
+        strippedTubeGeometries = []
+      }
+    }
     const tplList = templateJson[key]
     const tplItem = Array.isArray(tplList) && tplList.length ? tplList[0] : null
     for (const item of list) {
@@ -180,6 +248,25 @@ function normalizeSceneState(state) {
       // 颜色归一化：设计器回写的颜色可能是 THREE.Color 对象（isColor），转十进制数字避免变黑
       if (key === 'lightCores' && item.color !== undefined) {
         item.color = normalizeColorValue(item.color)
+      }
+      // 低分段默认（与 viewer 一致，消"塑料圆滑感"，现代游戏低模的可见棱面质感）：
+      // three-edit-cores 用 new THREE[type](...Object.values(parameters)) 创建，缺省分段是 32/48 圆滑面；
+      // 此处按键序追加默认分段（JSON 显式写过的保留），使圆柱/球/锥/环呈现低模棱面。
+      if (key === 'innerCores' && item.geometry && item.geometry.parameters) {
+        const gp = item.geometry.parameters
+        const gt = item.geometry.type
+        if (gt === 'CylinderGeometry' && gp.radialSegments === undefined) gp.radialSegments = 16
+        else if (gt === 'ConeGeometry' && gp.radialSegments === undefined) gp.radialSegments = 16
+        else if (gt === 'SphereGeometry') {
+          if (gp.widthSegments === undefined) gp.widthSegments = 24
+          if (gp.heightSegments === undefined) gp.heightSegments = 16
+        } else if (gt === 'TorusGeometry') {
+          if (gp.radialSegments === undefined) gp.radialSegments = 12
+          if (gp.tubularSegments === undefined) gp.tubularSegments = 24
+        } else if (gt === 'CapsuleGeometry') {
+          if (gp.capSegments === undefined) gp.capSegments = 6
+          if (gp.radialSegments === undefined) gp.radialSegments = 16
+        }
       }
       if (item.material && typeof item.material === 'object') {
         normalizeMaterialColors(item.material)
@@ -244,59 +331,7 @@ function applySceneEnvironment(editor, state) {
   } catch (e) {}
 }
 
-/**
- * 程序化纹理（Canvas 2D 噪声，无外部资源）：与 scene-3d viewer 一致的表面质感，
- * 按对象语义自动附加油墙面微噪/地面颗粒/金属拉丝，消除纯色"塑料感"。
- */
-const TEXTURE_KINDS = {
-  concrete: { base: 118, amp: 32, detail: 'grain' },
-  ground: { base: 72, amp: 22, detail: 'grain' },
-  wall: { base: 206, amp: 14, detail: 'grain' },
-  metal: { base: 150, amp: 10, detail: 'brushed' },
-}
-
-function createProceduralTexture(kind, seed = 7) {
-  try {
-    const size = 256
-    const canvas = document.createElement('canvas')
-    canvas.width = canvas.height = size
-    const ctx = canvas.getContext('2d')
-    let s = seed || 7
-    const rand = () => { s = (s * 16807) % 2147483647; return s / 2147483647 }
-    const cfg = TEXTURE_KINDS[kind] || TEXTURE_KINDS.concrete
-    const img = ctx.createImageData(size, size)
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const i = (y * size + x) * 4
-        let v = cfg.base + rand() * cfg.amp
-        if (cfg.detail === 'brushed') v = cfg.base + Math.sin(y / size * Math.PI * 26) * 9 + rand() * cfg.amp
-        img.data[i] = v
-        img.data[i + 1] = v
-        img.data[i + 2] = v
-        img.data[i + 3] = 255
-      }
-    }
-    ctx.putImageData(img, 0, 0)
-    const tex = new THREE.CanvasTexture(canvas)
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping
-    tex.repeat.set(3, 3)
-    return tex
-  } catch (e) {
-    return null
-  }
-}
-
-function inferTextureKind(name, mat) {
-  const n = String(name || '').toLowerCase()
-  if (mat && (mat.transparent || (mat.emissive && mat.emissive.getHex() !== 0))) return null
-  if (/玻璃|glass|透明/.test(n)) return null
-  if (/金属|钢|铁|管|柱|烟囱|管道|螺栓|设备|栏杆/.test(n)) return 'metal'
-  if (/地面|道路|路面|路|floor|ground|场地|停车位/.test(n)) return 'ground'
-  if (/墙|屋顶|楼|建筑|厂房|宿舍|仓库|车间|围墙|勒脚/.test(n)) return 'wall'
-  return null
-}
-
-/** 场景加载后遍历材质附加程序化纹理（仅未带纹理的 Standard/Lambert/Phong，玻璃/发光跳过） */
+/** 场景加载后遍历材质附加结构化程序化纹理（仅未带纹理的 Standard/Lambert/Phong，玻璃/发光跳过） */
 function fixSceneMaterials(editor) {
   try {
     editor.scene.traverse((o) => {
@@ -304,14 +339,84 @@ function fixSceneMaterials(editor) {
       const mat = o.material
       if (mat.type !== 'MeshStandardMaterial' && mat.type !== 'MeshLambertMaterial' && mat.type !== 'MeshPhongMaterial') return
       if (mat.map || mat.alphaMap) return
-      const kind = inferTextureKind(o.name, mat)
-      if (!kind) return
-      const tex = createProceduralTexture(kind)
-      if (tex) {
-        mat.map = tex
-        mat.bumpMap = tex
-        mat.bumpScale = 0.02
+      // inferSurfaceKind 期望纯字段 JSON，但这里 mat 是 three.js Material 实例
+      // （emissive 是 Color 对象非 0），必须先扁平化为纯字段，否则会被误判为发光材质跳过纹理
+      const matState = {
+        type: mat.type,
+        transparent: !!mat.transparent,
+        emissive: mat.emissive && typeof mat.emissive === 'object' && typeof mat.emissive.getHex === 'function' ? mat.emissive.getHex() : mat.emissive
+      }
+      const kind = inferSurfaceKind(o.name, matState)
+      const tex = kind ? getSurfaceTextures(kind) : null
+      // 细长柱体（灯柱/树干/旗杆/栏杆）：纹理在细柱上压缩成横条纹（条纹材质根因），且真实细柱是纯色漆面——跳过纹理
+      const geoState = o.geometry ? { type: o.geometry.type, parameters: o.geometry.parameters } : null
+      if (kind && tex && !isSlimColumn(geoState)) {
+        mat.map = tex.map
+        mat.bumpMap = tex.map
+        mat.bumpScale = 0.025
+        if (tex.normalMap) mat.normalMap = tex.normalMap
+        if (tex.roughnessMap) {
+          mat.roughnessMap = tex.roughnessMap
+          mat.roughness = 1
+          if (kind === 'metal') {
+            // 金属表面：保留/提升金属度（拉丝与粗糙度变化由贴图表达），增强环境反射（与 viewer 一致）
+            mat.metalness = Math.max(typeof mat.metalness === 'number' ? mat.metalness : 0.6, 0.5)
+            mat.envMapIntensity = 1.4
+          } else {
+            mat.metalness = Math.min(typeof mat.metalness === 'number' ? mat.metalness : 0, 0.1)
+            mat.envMapIntensity = 0.9
+          }
+        } else if (kind === 'metal') {
+          mat.envMapIntensity = 1.25
+        }
+        // 楼体/草地同名阵列颜色微抖动 ±4%（暂存原始色：保存时恢复，防止乘算颜色被序列化导致每次保存循环累积加深）
+        if (kind === 'facade' || kind === 'grass') {
+          if (mat.color) {
+            if (o.userData.origColor === undefined) o.userData.origColor = mat.color.getHex()
+            mat.color.multiplyScalar(1 + (nameJitter(o.name) - 0.5) * 0.08)
+          }
+        }
+        // 世界尺度 UV：Box/Plane 按真实米数重写（窗/缝/波纹真实尺寸、六面密度一致；圆角化的小 Box 跳过）
+        if (o.geometry && o.geometry.type === 'BoxGeometry') {
+          const p = o.geometry.parameters || {}
+          applyBoxWorldUV(o.geometry, p.width ?? 1, p.height ?? 1, p.depth ?? 1, SURFACE_UNIT[kind])
+        } else if (o.geometry && o.geometry.type === 'PlaneGeometry') {
+          const p = o.geometry.parameters || {}
+          applyPlaneWorldUV(o.geometry, p.width ?? 1, p.height ?? 1, SURFACE_UNIT[kind])
+        } else if (o.geometry && (o.geometry.type === 'CylinderGeometry' || o.geometry.type === 'ConeGeometry')) {
+          applyCylinderWorldUV(o.geometry, SURFACE_UNIT[kind])
+        }
+        // facade 楼体顶/底去窗（设计器侧暂时省略材质数组：three-edit-cores 渲染管线对材质数组
+        // 支持不完整，设置后 Mesh 不渲染。仅应用基础纹理，俯视的"楼顶有窗"留待 viewer 端处理；
+        // viewer 端保留材质数组逻辑（双端渲染特性对齐暂未完成，先保设计器可看）
+        // 设计器材质数组被验证会让 Mesh 不可见（截图渲染区空白），故跳过此分支
+        if (false && kind === 'facade' && o.geometry && o.geometry.type === 'BoxGeometry') {
+          const capMat = mat.clone()
+          capMat.map = null
+          capMat.bumpMap = null
+          capMat.roughnessMap = null
+          capMat.normalMap = null
+          capMat.roughness = 0.9
+          capMat.metalness = 0
+          if (capMat.color) capMat.color.multiplyScalar(0.9)
+          capMat.needsUpdate = true
+          o.userData.origMaterial = mat
+          // BoxGeometry 材质组序：px, nx, py, ny, pz, nz——±y（顶/底）用无纹理材质
+          o.material = [mat, mat, capMat, capMat, mat, mat]
+        }
         mat.needsUpdate = true
+      }
+    })
+  } catch (e) {}
+}
+
+/** 对象阴影（与 viewer 一致，写实阴影四要素之物体侧）：全部对象投影 + 接收，云不投影避免糊满地面 */
+function fixSceneShadows(editor) {
+  try {
+    editor.scene.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = !/云|cloud/i.test(o.name || '')
+        o.receiveShadow = true
       }
     })
   } catch (e) {}
@@ -327,7 +432,9 @@ function roundSceneBoxes(editor) {
       const w = p.width || 1, h = p.height || 1, d = p.depth || 1
       const maxSide = Math.max(w, h, d)
       const minSide = Math.min(w, h, d)
-      if (maxSide <= 0.3 || maxSide / minSide > 3) return
+      // 与 viewer 一致（ROUND_BOX_MAX）：仅"小且近立方体"的 Box 圆角——大 Box（楼体/墙体/地面）必须
+      // 保持直角 BoxGeometry，世界尺度 UV 才能精确映射纹理分格；大 Box 圆角会丢 UV，楼体窗阵列只剩 1 层
+      if (maxSide > ROUND_BOX_MAX || maxSide / minSide > 3) return
       const g = new RoundedBoxGeometry(w, h, d, 3, minSide * 0.07)
       o.userData.origGeometry = o.geometry // 保留原始 Box，saveSceneEdit 前换回（防止增强类型泄漏到 JSON）
       o.geometry.dispose()
@@ -336,64 +443,7 @@ function roundSceneBoxes(editor) {
   } catch (e) {}
 }
 
-/** 确定性 3D 值噪声（与 scene-3d viewer 一致）：哈希格点 + 三线性插值 + 2 倍频叠加 */
-function hashNoise3(x, y, z) {
-  let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(z, 1274126177)) | 0
-  h = Math.imul(h ^ (h >>> 13), 1103515245)
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967295
-}
-
-function valueNoise3(x, y, z) {
-  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z)
-  const xf = x - xi, yf = y - yi, zf = z - zi
-  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf)
-  const c000 = hashNoise3(xi, yi, zi), c100 = hashNoise3(xi + 1, yi, zi)
-  const c010 = hashNoise3(xi, yi + 1, zi), c110 = hashNoise3(xi + 1, yi + 1, zi)
-  const c001 = hashNoise3(xi, yi, zi + 1), c101 = hashNoise3(xi + 1, yi, zi + 1)
-  const c011 = hashNoise3(xi, yi + 1, zi + 1), c111 = hashNoise3(xi + 1, yi + 1, zi + 1)
-  const x00 = c000 + (c100 - c000) * u, x10 = c010 + (c110 - c010) * u
-  const x01 = c001 + (c101 - c001) * u, x11 = c011 + (c111 - c011) * u
-  const y0 = x00 + (x10 - x00) * v, y1 = x01 + (x11 - x01) * v
-  return y0 + (y1 - y0) * w
-}
-
-function fbmNoise3(x, y, z) {
-  return 0.65 * valueNoise3(x, y, z) + 0.35 * valueNoise3(x * 2.7 + 11, y * 2.7 + 11, z * 2.7 + 11)
-}
-
-/** 有机对象类型（与 scene-3d viewer 一致）：树冠/树叶/灌木/绿化 → leaf；云 → cloud。排除"百叶" */
-function inferOrganicKind(name) {
-  const n = String(name || '').toLowerCase()
-  if (/云|cloud/.test(n)) return 'cloud'
-  if (/树冠|树叶|灌木|绿化|(?<!百)叶/.test(n)) return 'leaf'
-  return null
-}
-
-/** 有机形变（与 scene-3d viewer 一致）：球体/多面体顶点沿法向噪声位移，leaf 面片化、cloud 低频平缓 */
-function displaceOrganicGeometry(geometry, kind) {
-  const radius = (geometry.parameters && geometry.parameters.radius) || 0.5
-  const freq = kind === 'cloud' ? 2.2 / radius : 3.2 / radius
-  const amp = kind === 'cloud' ? 0.4 : 0.55
-  const pos = geometry.attributes.position
-  const v = new THREE.Vector3()
-  for (let i = 0; i < pos.count; i++) {
-    v.fromBufferAttribute(pos, i)
-    const n = fbmNoise3(v.x * freq, v.y * freq, v.z * freq)
-    v.multiplyScalar(1 + (n - 0.5) * amp)
-    pos.setXYZ(i, v.x, v.y, v.z)
-  }
-  pos.needsUpdate = true
-  if (kind === 'leaf') {
-    const g = geometry.toNonIndexed()
-    g.computeVertexNormals()
-    geometry.dispose()
-    return g
-  }
-  geometry.computeVertexNormals()
-  return geometry
-}
-
-/** 场景加载后对树冠/云等有机对象做噪声形变（写实轮廓，与 scene-3d viewer 一致） */
+/** 有机形变（与 viewer 一致）：树冠/叶/灌木/云的球体顶点噪声位移为不规则有机轮廓（写实感，双端同源） */
 function fixSceneOrganic(editor) {
   try {
     editor.scene.traverse((o) => {
@@ -411,7 +461,37 @@ function fixSceneOrganic(editor) {
   } catch (e) {}
 }
 
-/** 场景自动取景：相机对准场景包围盒中心（查看器标准行为；生成质量问题由提示词约束，不做兼容修补） */
+/** 基底层排除（与 scene-3d viewer 一致）：地面/道路/树/路灯等大面积铺底或配景不参与取景包围盒——
+ * 否则巨大地面会把包围盒撑爆、取景距离极远，模型在视口中渺小（"显示不全"） */
+const FRAME_EXCLUDE_RE = /云|cloud|地面|地坪|地板|场地|道路|公路|路面|人行道|停车场|主干道|主路|支路|车道|标线|中线|黄线|斑马|绿化带|绿带|围栏|护栏|围墙|树|路灯|灯柱|车辆|汽车/i
+
+/** 阴影质量调优（与 viewer 一致）：castShadow 的平行光/聚光灯——2048 贴图、normalBias 防阴影痤疮、
+ * shadow camera 范围按主体包围盒自适应（默认 ±5 的阴影相机对园区场景会把阴影裁成碎块） */
+function tuneShadowLights(editor, box) {
+  try {
+    const size = box.getSize(new THREE.Vector3())
+    const radius = Math.max(size.x, size.z, 4) * 0.75 + 2
+    editor.scene.traverse((o) => {
+      if ((o.isDirectionalLight || o.isSpotLight) && o.castShadow && o.shadow) {
+        o.shadow.mapSize.set(2048, 2048)
+        o.shadow.normalBias = 0.03
+        o.shadow.bias = -0.0001
+        o.shadow.radius = 4
+        const cam = o.shadow.camera
+        if (cam) {
+          cam.left = -radius; cam.right = radius
+          cam.top = radius; cam.bottom = -radius
+          cam.near = 0.5
+          cam.far = radius * 6
+          cam.updateProjectionMatrix()
+        }
+      }
+    })
+  } catch (e) {}
+}
+
+/** 场景自动取景：相机对准场景包围盒中心（与 scene-3d viewer 同公式，两侧初始视角一致）。
+ * 基底层不参与包围盒——取景只框主体群。 */
 function centerAndFrameScene(editor) {
   try {
     const scene = editor.scene
@@ -420,7 +500,7 @@ function centerAndFrameScene(editor) {
     const box = new THREE.Box3()
     let has = false
     scene.traverse((o) => {
-      if (o.isMesh && o.visible && !o.isHelper && o.name && !/云|cloud/i.test(o.name)) {
+      if (o.isMesh && o.visible && !o.isHelper && o.name && !FRAME_EXCLUDE_RE.test(o.name)) {
         box.expandByObject(o)
         has = true
       }
@@ -437,15 +517,26 @@ function centerAndFrameScene(editor) {
       size.copy(box.getSize(new THREE.Vector3()))
     }
     const center = box.getCenter(new THREE.Vector3())
-    const d = Math.max(size.x, size.z, 1) * 1.4 + 1.5
-    // 相机位于包围盒中心斜上方 45°，轨道目标对准中心（场景偏离原点也能正确取景）
-    camera.position.set(center.x + d * 0.72, center.y + d * 0.48, center.z + d * 0.72)
+    // 取景距离按水平视场自适应（宽屏水平视野大）：对角机位下内容水平投影 ≈ (size.x+size.z)/√2，
+    // 内容占水平视场 ~85%——与 viewer 保持一致，模型在视口中更大更饱满，无需手动放大
+    const fovV = (camera.fov * Math.PI) / 360
+    const fovH = 2 * Math.atan(Math.tan(fovV) * (camera.aspect || 1.6))
+    const spanH = (size.x + size.z) / Math.SQRT2
+    const d = Math.max((spanH / 2) / Math.tan(fovH / 2) * 1.18, size.x * 0.4, size.z * 0.4, 2.5)
+    // 视角按内容高宽比自适应（与 viewer 一致）：内容越高视角越平、越平视角越陡；下限 0.55 保证顶边射线落地
+    const flat = Math.max(size.x, size.z, 1)
+    const yFactor = Math.min(0.85, Math.max(0.55, 0.55 + (size.y / flat) * 0.4))
+    camera.position.set(center.x + d * 0.72, center.y + d * yFactor, center.z + d * 0.72)
     if (editor.controls) {
       editor.controls.target.set(center.x, center.y, center.z)
       editor.controls.update()
     }
     camera.lookAt(center.x, center.y, center.z)
-  } catch (e) {}
+    tuneShadowLights(editor, box)
+    return camera.position.clone()
+  } catch (e) {
+    return null
+  }
 }
 
 /** 渲染器质量：ACES 电影色调映射（写实色彩）+ 柔和阴影（与 scene-3d viewer 一致） */
@@ -453,12 +544,13 @@ function fixRendererQuality(editor, state) {
   try {
     const r = editor.renderer
     if (!r) return
-    const tm = state && state.webglRenderer && typeof state.webglRenderer.toneMapping === 'number' ? state.webglRenderer.toneMapping : 0
+    const wg = (state && state.webglRenderer) || {}
+    const tm = typeof wg.toneMapping === 'number' ? wg.toneMapping : 0
     if (tm !== 0) {
       r.toneMapping = 4 // ACESFilmicToneMapping
-      r.toneMappingExposure = 1
+      r.toneMappingExposure = typeof wg.toneMappingExposure === 'number' ? wg.toneMappingExposure : 1
     }
-    const shadows = !!(state && state.webglRenderer && state.webglRenderer.shadowMap && state.webglRenderer.shadowMap.enabled)
+    const shadows = !!(wg.shadowMap && wg.shadowMap.enabled)
     if (shadows) {
       r.shadowMap.enabled = true
       r.shadowMap.type = 2 // PCFSoftShadowMap
@@ -466,31 +558,100 @@ function fixRendererQuality(editor, state) {
   } catch (e) {}
 }
 
+/** 场景增强链（全部幂等）：灯光/材质纹理/阴影/圆角/有机形变。
+ * resetEditorStorage 通过响应式 store 创建场景对象，Mesh 在渲染循环中才真正就绪——
+ * applyScene 里同步调用可能遍历不到对象（材质/圆角全部失效），
+ * 必须由 scheduleFrameScene 在对象就绪后补跑一次。 */
+function applyEnhancements(editor) {
+  if (!editor) return
+  fixSceneLights(editor)
+  fixSceneMaterials(editor)
+  fixSceneShadows(editor)
+  roundSceneBoxes(editor)
+  fixSceneOrganic(editor)
+}
+
 function applyScene(doc) {
   pendingScene = { sceneDocument: doc, version: (pendingScene?.version || 0) + 1 }
   if (threeEditor && toState(doc)) {
     const state = normalizeSceneState(toState(doc))
     threeEditor.resetEditorStorage(state)
-    fixSceneLights(threeEditor)
-    fixSceneMaterials(threeEditor)
-    roundSceneBoxes(threeEditor)
-    fixSceneOrganic(threeEditor)
+    applyEnhancements(threeEditor)
     fixRendererQuality(threeEditor, state)
     applySceneEnvironment(threeEditor, state)
-    // resetEditorStorage 异步创建场景对象，取景需延迟到对象就绪后执行
+    // resetEditorStorage 异步创建场景对象，取景与增强需延迟到对象就绪后执行
     scheduleFrameScene()
     appliedVersion = pendingScene.version
   }
 }
 
 let frameSceneTimer = null
-/** 延迟取景（等 resetEditorStorage 的场景对象创建完成），并防抖多次触发 */
-function scheduleFrameScene() {
+let framedCameraPos = null // 首次取景记录的相机位置（二次兜底前校验用户未动相机）
+/** 延迟取景（等 resetEditorStorage 的场景对象创建完成）并防抖；800ms 后二次兜底重框——
+ * 大场景（80+ 对象）异步构建可能超过单次延迟，首次取景只框到局部（"显示不全"）。
+ * 仅当用户未动过相机（位置仍等于首次取景位置）才重框，不覆盖用户操作。 */
+function countMeshes(editor) {
+  let n = 0
+  try {
+    editor.scene.traverse((o) => { if (o.isMesh) n++ })
+  } catch (e) {}
+  return n
+}
+
+function scheduleFrameScene(retry = 0) {
   if (frameSceneTimer) clearTimeout(frameSceneTimer)
   frameSceneTimer = setTimeout(() => {
     frameSceneTimer = null
-    if (threeEditor) centerAndFrameScene(threeEditor)
+    if (!threeEditor) return
+    // 对象就绪后补跑增强（resetEditorStorage 异步创建，applyScene 首轮同步调用可能遍历不到对象）
+    applyEnhancements(threeEditor)
+    // 大场景对象异步创建可能超过 200ms：无 Mesh 时延后重试，直到就绪（上限 5 次）
+    if (countMeshes(threeEditor) === 0 && retry < 5 && pendingScene) {
+      scheduleFrameScene(retry + 1)
+      return
+    }
+    framedCameraPos = centerAndFrameScene(threeEditor)
+    // 启动嵌入模式专属渲染循环：three-edit-cores 内置循环在嵌入环境下未正确初始化相机方向
+    // （camera.lookAt 未被触发），每帧 render 输出空白。手动循环覆盖：每帧 controls.update
+    // 让相机看向 target，再 renderer.render 输出到 canvas
+    startEmbedRenderLoop()
+    setTimeout(() => {
+      if (!threeEditor || !threeEditor.camera) return
+      const p = threeEditor.camera.position
+      const moved = framedCameraPos && (
+        Math.abs(p.x - framedCameraPos.x) > 0.01 ||
+        Math.abs(p.y - framedCameraPos.y) > 0.01 ||
+        Math.abs(p.z - framedCameraPos.z) > 0.01
+      )
+      if (!framedCameraPos || (!moved && countMeshes(threeEditor) > 0)) {
+        centerAndFrameScene(threeEditor)
+      }
+    }, 800)
   }, 200)
+}
+
+/** 嵌入模式渲染循环：每帧 controls.update + camera.lookAt(target) + renderer.render，
+ * 解决 three-edit-cores 内置循环在嵌入模式下未触发相机朝向的渲染空白问题。
+ * destroySceneRender 同步取消。 */
+let embedRenderRaf = null
+function startEmbedRenderLoop() {
+  if (embedRenderRaf) return
+  if (!IS_EMBED) return
+  const tick = () => {
+    embedRenderRaf = requestAnimationFrame(tick)
+    if (!threeEditor || !threeEditor.renderer || !threeEditor.scene || !threeEditor.camera) return
+    try {
+      if (threeEditor.controls) threeEditor.controls.update()
+      const t = threeEditor.controls && threeEditor.controls.target
+      if (t) threeEditor.camera.lookAt(t.x, t.y, t.z)
+      threeEditor.renderer.render(threeEditor.scene, threeEditor.camera)
+    } catch (e) {}
+  }
+  embedRenderRaf = requestAnimationFrame(tick)
+}
+function stopEmbedRenderLoop() {
+  if (embedRenderRaf) cancelAnimationFrame(embedRenderRaf)
+  embedRenderRaf = null
 }
 
 function applyTitle(payload) {
@@ -509,7 +670,17 @@ function applyTheme(theme) {
 }
 
 function wrapScene() {
-  return { schemaVersion: '1.0', engine: 'three-edit-cores', state: threeEditor.saveSceneEdit() }
+  const state = threeEditor.saveSceneEdit()
+  // 合并回加载时剥离的 TubeGeometry 条目（设计器不支持但不丢弃，保持场景文档无损）
+  if (strippedTubeGeometries.length) {
+    try {
+      if (!Array.isArray(state.innerCores)) state.innerCores = []
+      state.innerCores.push(...strippedTubeGeometries)
+    } catch (e) {}
+  }
+  // 颜色归一化（兜底：即使 saveSceneEdit 包装未生效，输出也保持 sRGB 十进制）
+  normalizeSerializedColors(state)
+  return { schemaVersion: '1.0', engine: 'three-edit-cores', state }
 }
 
 /**
@@ -715,8 +886,29 @@ export function setupEmbedEditor(editor) {
           o.geometry = o.userData.origGeometry
         }
       })
+      // 保存前换回单材质（facade 顶/底去窗材质数组是渲染增强，JSON 必须保持单材质，否则核心序列化/页面重建异常）
+      const matSwapped = []
+      editor.scene.traverse((o) => {
+        if (o.userData && o.userData.origMaterial) {
+          matSwapped.push([o, o.material])
+          o.material = o.userData.origMaterial
+        }
+      })
+      // 保存前恢复原始颜色（微抖动是渲染增强：乘算颜色若被序列化，每次保存/加载循环都会累积加深/变亮）
+      const colorSwapped = []
+      editor.scene.traverse((o) => {
+        const m = Array.isArray(o.material) ? o.material[0] : o.material
+        if (o.userData && o.userData.origColor && m && m.color) {
+          colorSwapped.push([m, m.color.getHex()])
+          m.color.setHex(o.userData.origColor)
+        }
+      })
       const result = origSave(...args)
       for (const [o, g] of swapped) o.geometry = g
+      for (const [o, m] of matSwapped) o.material = m
+      for (const [m, hex] of colorSwapped) m.color.setHex(hex)
+      // 序列化结果颜色归一化：isColor 线性对象 → sRGB 十进制（防止线性分量泄漏/累积变暗）
+      normalizeSerializedColors(result)
       if (tc.object !== prevObject && prevObject && prevObject.parent) {
         try { tc.attach(prevObject) } catch (e) {}
       }
@@ -726,10 +918,7 @@ export function setupEmbedEditor(editor) {
   if (pendingScene && appliedVersion !== pendingScene.version && toState(pendingScene.sceneDocument)) {
     const state = normalizeSceneState(toState(pendingScene.sceneDocument))
     threeEditor.resetEditorStorage(state)
-    fixSceneLights(threeEditor)
-    fixSceneMaterials(threeEditor)
-    roundSceneBoxes(threeEditor)
-    fixSceneOrganic(threeEditor)
+    applyEnhancements(threeEditor)
     fixRendererQuality(threeEditor, state)
     applySceneEnvironment(threeEditor, state)
     scheduleFrameScene()
