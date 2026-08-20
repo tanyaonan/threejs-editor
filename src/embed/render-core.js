@@ -886,6 +886,30 @@ function tuneShadowLights(scene, box) {
   })
 }
 
+/** 地面延展：把声明 autoExtend 的主地面世界 x/z 尺寸延展到覆盖取景画面（纵深 ≥ 4.5×d、横向 ≥ 2.6×d）——
+ * 共享渲染核心统一实现，viewer 与设计器取景后复用同一逻辑，保证地面大小双端一致。 */
+function extendGround(scene, d) {
+  const targetX = d * 2.6
+  const targetZ = d * 4.5
+  scene.traverse((o) => {
+    if (!o.isMesh || !o.userData.autoExtend) return
+    const box = new THREE.Box3().setFromObject(o)
+    const size = box.getSize(new THREE.Vector3())
+    if (size.x <= 0 || size.z <= 0) return
+    const kx = Math.max(1, targetX / size.x)
+    const kz = Math.max(1, targetZ / size.z)
+    // 平放 Plane（绕 x 旋转 ±90°）：世界 z 对应 local scale.y；Box：直接 scale.z
+    const isLaidPlane = Math.abs(Math.abs(o.rotation.x % Math.PI) - Math.PI / 2) < 0.2
+    if (isLaidPlane) {
+      o.scale.x *= kx
+      o.scale.y *= kz
+    } else {
+      o.scale.x *= kx
+      o.scale.z *= kz
+    }
+  })
+}
+
 export {
   THREE,
   SURFACE_UNIT,
@@ -906,4 +930,5 @@ export {
   applyTransform3,
   resolveVec3,
   tuneShadowLights,
+  extendGround,
 }

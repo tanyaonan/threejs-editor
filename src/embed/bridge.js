@@ -32,6 +32,7 @@ import {
   applyCylinderWorldUV,
   isSlimColumn,
   displaceOrganicGeometry,
+  extendGround,
 } from './render-core.js'
 
 const parseQuery = () => {
@@ -173,6 +174,33 @@ function normalizeSerializedColors(state) {
           if (item.material.emissive !== undefined) item.material.emissive = fix(item.material.emissive)
         }
         if (item.color !== undefined) item.color = fix(item.color)
+      }
+    }
+  } catch (e) {}
+  return state
+}
+
+/** 导出端规整 scene.background / fog：直接从编辑器实例还原颜色与近远。
+ * 核心 saveSceneEdit() 会把 scene.background 序列化成无有效色的对象（如 { colorSpace: '' }）、
+ * 把 fog 写成 exp2 且丢失 near/far——页面渲染器需要数字/字符串颜色与近远。
+ * 故从 threeEditor.scene 读真实 THREE.Color / Fog，按页面支持的格式写回，避免导出丢色/丢雾。 */
+function normalizeSceneEnv(state) {
+  try {
+    if (!state || typeof state !== 'object') return state
+    const scene = state.scene && typeof state.scene === 'object' ? state.scene : {}
+    const live = threeEditor && threeEditor.scene
+    if (!live) return state
+    // 背景：编辑器实例背景是 Color 时还原为颜色数字；是环境贴图/纹理或无背景时置透明，但不破坏 backgroundUrls
+    if (live.background && live.background.isColor) {
+      scene.background = live.background.getHex()
+    }
+    // 雾：还原线性 Fog 的 near/far 或 exp2 的 density + 颜色
+    if (live.fog && live.fog.isFog) {
+      const c = (live.fog.color && live.fog.color.isColor) ? live.fog.color.getHex() : live.fog.color
+      if (live.fog.isFogExp2) {
+        scene.fog = { type: 'exp2', color: c, density: typeof live.fog.density === 'number' ? live.fog.density : 0.03 }
+      } else {
+        scene.fog = { color: c, near: live.fog.near, far: live.fog.far }
       }
     }
   } catch (e) {}
@@ -386,30 +414,45 @@ function fixSceneMaterials(editor) {
       if (kind && tex && !isSlimColumn(geoState)) {
         mat.map = tex.map
         mat.bumpMap = tex.map
-        mat.bumpScale = 0.025
-        if (tex.normalMap && (isPBR || isPhong)) mat.normalMap = tex.normalMap
+        mat.bumpScale = kind === 'bark' || kind === 'leaf' ? 0.045 : 0.03
+        if (tex.normalMap && (isPBR || isPhong)) {
+          mat.normalMap = tex.normalMap
+          mat.normalScale = new THREE.Vector2(1.4, 1.4)
+        }
         if (tex.roughnessMap && isPBR) {
           mat.roughnessMap = tex.roughnessMap
-          // roughnessMap 与 base roughness 相乘，保留用户传入值；未指定时按 kind 给默认值
-          const baseRoughness = typeof mat.roughness === 'number' ? mat.roughness : null
+          // 与 render-core（共享渲染核心）createMaterialFromCore 一致：基础 roughness 决定整体质感，贴图提供变化
+          const baseR = typeof mat.roughness === 'number' ? mat.roughness : 0.85
+          mat.roughness = Math.min(Math.max(baseR, 0.72), 1.0)
           if (kind === 'metal') {
-            mat.roughness = baseRoughness ?? 0.3
             mat.metalness = Math.max(typeof mat.metalness === 'number' ? mat.metalness : 0.6, 0.5)
-            mat.envMapIntensity = 1.4
+            mat.envMapIntensity = 1.5
           } else {
-            mat.roughness = baseRoughness ?? 0.85
-            mat.metalness = Math.min(typeof mat.metalness === 'number' ? mat.metalness : 0, 0.1)
-            mat.envMapIntensity = 1.25
+            mat.metalness = Math.min(typeof mat.metalness === 'number' ? mat.metalness : 0, 0.05)
+            mat.envMapIntensity = 1.5
           }
         } else if (kind === 'metal') {
-          mat.envMapIntensity = 1.25
+          mat.envMapIntensity = 1.5
         }
-        // 楼体/草地同名阵列颜色微抖动 ±4%（暂存原始色：保存时恢复，防止乘算颜色被序列化导致每次保存循环累积加深）
-        if (kind === 'facade' || kind === 'grass') {
+        // 建筑/环境纹理被高饱和颜色染色会变塑料色，向白色淡化让贴图图案主导（与 render-core 一致）
+        if (kind === 'facade' || kind === 'factoryWall' || kind === 'brick' || kind === 'concrete' || kind === 'roof' || kind === 'paver' || kind === 'asphalt') {
+          mat.color.lerp(new THREE.Color(0xffffff), 0.78)
+        }
+        // 楼体/草地/树叶同名阵列颜色微抖动 ±4%（暂存原始色：保存时恢复，防止乘算颜色被序列化导致每次保存循环累积加深）
+        if (kind === 'facade' || kind === 'grass' || kind === 'leaf') {
           if (mat.color) {
             if (o.userData.origColor === undefined) o.userData.origColor = mat.color.getHex()
             mat.color.multiplyScalar(1 + (nameJitter(o.name) - 0.5) * 0.08)
           }
+        }
+        // 树皮适当压暗并提高粗糙度（与 render-core 一致）
+        if (kind === 'bark') {
+          mat.roughness = 0.96
+          mat.color.multiplyScalar(0.92)
+        }
+        // 叶簇面片化（与 render-core 一致）
+        if (kind === 'leaf') {
+          mat.flatShading = true
         }
         // 世界尺度 UV：Box/Plane 按真实米数重写（窗/缝/波纹真实尺寸、六面密度一致；圆角化的小 Box 跳过）
         if (o.geometry && o.geometry.type === 'BoxGeometry') {
@@ -597,6 +640,8 @@ function centerAndFrameScene(editor) {
       editor.controls.update()
     }
     camera.lookAt(cx, cy, cz)
+    // 主地面自动延展：声明 autoExtend 的地面延展到画面之外（与 scene-3d viewer 一致，共享 render-core 实现）
+    extendGround(editor.scene, d)
     tuneShadowLights(editor, box)
     return camera.position.clone()
   } catch (e) {
@@ -811,6 +856,10 @@ function wrapScene() {
   }
   // 颜色归一化（兜底：即使 saveSceneEdit 包装未生效，输出也保持 sRGB 十进制）
   normalizeSerializedColors(state)
+  // 导出端规整：剥离编辑会话辅助（handler.helpers 的网格/坐标轴/包围盒），页面三维不渲染它们；
+  // 并从编辑器实例还原 scene.background/fog 颜色与近远，避免导出丢色/丢雾。
+  if (state.handler && typeof state.handler === 'object') delete state.handler.helpers
+  normalizeSceneEnv(state)
   return { schemaVersion: '1.0', engine: 'three-edit-cores', state }
 }
 
