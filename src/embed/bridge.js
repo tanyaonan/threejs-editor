@@ -319,7 +319,8 @@ function applySceneEnvironment(editor, state) {
   try {
     const scene = editor.scene
     if (!scene) return
-    const enabled = !!(state && state.scene && state.scene.environmentEnabled === true)
+    // 默认启用程序化环境贴图（RoomEnvironment），除非 scene.environmentEnabled 显式为 false
+    const enabled = state && state.scene && state.scene.environmentEnabled === false ? false : true
     if (enabled) {
       const pmrem = new THREE.PMREMGenerator(editor.renderer)
       const tex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
@@ -331,13 +332,16 @@ function applySceneEnvironment(editor, state) {
   } catch (e) {}
 }
 
-/** 场景加载后遍历材质附加结构化程序化纹理（仅未带纹理的 Standard/Lambert/Phong，玻璃/发光跳过） */
+/** 场景加载后遍历材质附加结构化程序化纹理（仅未带纹理的 Standard/Physical/Lambert/Phong，玻璃/发光跳过） */
 function fixSceneMaterials(editor) {
   try {
     editor.scene.traverse((o) => {
       if (!o.isMesh || Array.isArray(o.material)) return
       const mat = o.material
-      if (mat.type !== 'MeshStandardMaterial' && mat.type !== 'MeshLambertMaterial' && mat.type !== 'MeshPhongMaterial') return
+      const isPBR = mat.type === 'MeshStandardMaterial' || mat.type === 'MeshPhysicalMaterial'
+      const isLambert = mat.type === 'MeshLambertMaterial'
+      const isPhong = mat.type === 'MeshPhongMaterial'
+      if (!isPBR && !isLambert && !isPhong) return
       if (mat.map || mat.alphaMap) return
       // inferSurfaceKind 期望纯字段 JSON，但这里 mat 是 three.js Material 实例
       // （emissive 是 Color 对象非 0），必须先扁平化为纯字段，否则会被误判为发光材质跳过纹理
@@ -354,17 +358,19 @@ function fixSceneMaterials(editor) {
         mat.map = tex.map
         mat.bumpMap = tex.map
         mat.bumpScale = 0.025
-        if (tex.normalMap) mat.normalMap = tex.normalMap
-        if (tex.roughnessMap) {
+        if (tex.normalMap && (isPBR || isPhong)) mat.normalMap = tex.normalMap
+        if (tex.roughnessMap && isPBR) {
           mat.roughnessMap = tex.roughnessMap
-          mat.roughness = 1
+          // roughnessMap 与 base roughness 相乘，保留用户传入值；未指定时按 kind 给默认值
+          const baseRoughness = typeof mat.roughness === 'number' ? mat.roughness : null
           if (kind === 'metal') {
-            // 金属表面：保留/提升金属度（拉丝与粗糙度变化由贴图表达），增强环境反射（与 viewer 一致）
+            mat.roughness = baseRoughness ?? 0.3
             mat.metalness = Math.max(typeof mat.metalness === 'number' ? mat.metalness : 0.6, 0.5)
             mat.envMapIntensity = 1.4
           } else {
+            mat.roughness = baseRoughness ?? 0.85
             mat.metalness = Math.min(typeof mat.metalness === 'number' ? mat.metalness : 0, 0.1)
-            mat.envMapIntensity = 0.9
+            mat.envMapIntensity = 1.25
           }
         } else if (kind === 'metal') {
           mat.envMapIntensity = 1.25
@@ -545,12 +551,16 @@ function fixRendererQuality(editor, state) {
     const r = editor.renderer
     if (!r) return
     const wg = (state && state.webglRenderer) || {}
-    const tm = typeof wg.toneMapping === 'number' ? wg.toneMapping : 0
-    if (tm !== 0) {
+    // 兜底：即使外部精简 JSON 未指定 toneMapping/shadow，也默认启用 ACES + 柔和阴影
+    const tm = typeof wg.toneMapping === 'number' ? wg.toneMapping : null
+    if (tm !== null && tm !== 0) {
       r.toneMapping = 4 // ACESFilmicToneMapping
       r.toneMappingExposure = typeof wg.toneMappingExposure === 'number' ? wg.toneMappingExposure : 1
+    } else if (tm === null) {
+      r.toneMapping = 4
+      r.toneMappingExposure = typeof wg.toneMappingExposure === 'number' ? wg.toneMappingExposure : 1.1
     }
-    const shadows = !!(wg.shadowMap && wg.shadowMap.enabled)
+    const shadows = wg.shadowMap && typeof wg.shadowMap.enabled === 'boolean' ? wg.shadowMap.enabled : true
     if (shadows) {
       r.shadowMap.enabled = true
       r.shadowMap.type = 2 // PCFSoftShadowMap

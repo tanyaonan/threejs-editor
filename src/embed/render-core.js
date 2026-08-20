@@ -144,9 +144,9 @@ function drawFactoryWall(ctx, size, rand) {
   ctx.fillRect(0, size / 2, size, 5)
 }
 
-/** brick 砖墙：4 行 × 3 列错缝砖（0.5×0.375m），浅缝 + 每砖明度差 + 气孔 */
+/** brick 砖墙：4 行 × 3 列错缝砖（0.5×0.375m），红褐/黄褐砖 + 浅缝 + 气孔 */
 function drawBrick(ctx, size, rand) {
-  ctx.fillStyle = 'rgb(172,170,168)'
+  ctx.fillStyle = 'rgb(168,150,135)'
   ctx.fillRect(0, 0, size, size)
   const rows = 4, rowH = size / rows, cols = 3, colW = size / cols
   for (let r = 0; r < rows; r++) {
@@ -154,8 +154,11 @@ function drawBrick(ctx, size, rand) {
     for (let c = -1; c <= cols; c++) {
       const x = c * colW + offset + 2, y = r * rowH + 2
       const w = colW - 4, h = rowH - 4
-      const v = Math.round(206 + rand() * 26)
-      ctx.fillStyle = `rgb(${v},${v - 1},${v - 3})`
+      // 红褐到黄褐随机：R 主导，G 中等，B 压低
+      const br = Math.round(185 + rand() * 30)
+      const bg = Math.round(110 + rand() * 35)
+      const bb = Math.round(70 + rand() * 20)
+      ctx.fillStyle = `rgb(${br},${bg},${bb})`
       ctx.fillRect(x, y, w, h)
       const holes = rand() < 0.6 ? 1 : 2
       for (let k = 0; k < holes; k++) {
@@ -229,19 +232,21 @@ function drawRoof(ctx, size, rand) {
   ctx.fillRect(0, 0, 3, size)
 }
 
-/** grass 草地：大尺度云状明暗斑块（fbm）+ 草叶亮点/暗点 */
+/** grass 草地：带色相噪声的黄绿色草地（fbm 云斑 + 草叶亮/暗点） */
 function drawGrass(ctx, size) {
   const img = ctx.createImageData(size, size)
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const i = (y * size + x) * 4
       const n = fbmNoise3(x / 96, y / 96, 7.3)
-      // 参考图生态屋顶/草坪：均匀中绿偏亮 + 轻微云斑（不是暗绿噪点）
-      let v = 232 + (n - 0.5) * 30
       const r2 = hashNoise3(x | 0, y | 0, 13)
-      if (r2 > 0.985) v = 250
-      else if (r2 < 0.012) v = 198
-      img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255
+      // 中绿偏黄基调（参考 aesthetics #5C8A3C 色系），再叠加云斑与草叶亮/暗点
+      const spot = r2 > 0.985 ? 20 : r2 < 0.012 ? -25 : 0
+      const cloud = (n - 0.5) * 30
+      img.data[i] = Math.min(255, Math.max(0, 142 + cloud + spot))     // R 偏黄
+      img.data[i + 1] = Math.min(255, Math.max(0, 188 + cloud + spot)) // G 主导
+      img.data[i + 2] = Math.min(255, Math.max(0, 72 + cloud + spot * 0.5)) // B 压低
+      img.data[i + 3] = 255
     }
   }
   ctx.putImageData(img, 0, 0)
@@ -360,14 +365,28 @@ function getSurfaceTextures(kind) {
     const seedMap = { facade: 11, factoryWall: 23, brick: 37, concrete: 41, asphalt: 53, paver: 67, roof: 71, grass: 0, metal: 83 }
     SURFACE_DRAWERS[kind](ctx, size, makeRand(seedMap[kind]))
     // 垂直受光渐变（建筑类）：顶部亮→底部暗，体积感
-    if (SHADED_KINDS.has(kind)) addVerticalShade(canvas, kind === 'facade' ? 0.22 : 0.16)
+    if (SHADED_KINDS.has(kind)) addVerticalShade(canvas, kind === 'facade' ? 0.14 : 0.16)
     const entry = {
       map: makeCanvasTexture(canvas, true),
       normalMap: null,
       roughnessMap: null,
     }
     // 法线贴图：从亮度高度场生成（写实凹凸，告别平面贴图感）
-    try { entry.normalMap = makeCanvasTexture(heightToNormal(canvas), false) } catch (e) {}
+    // facade 窗玻璃区域单独做平：避免暗玻璃被算成凹陷法线
+    if (kind === 'facade') {
+      const flatCanvas = document.createElement('canvas')
+      flatCanvas.width = flatCanvas.height = size
+      flatCanvas.getContext('2d').drawImage(canvas, 0, 0)
+      const fctx = flatCanvas.getContext('2d')
+      const wy = Math.round((1 - 0.86) * size), wh = Math.round((0.86 - 0.42) * size)
+      const winW = Math.round(0.34 * size)
+      fctx.fillStyle = 'rgb(128,128,128)'
+      fctx.fillRect(Math.round(0.09 * size), wy, winW, wh)
+      fctx.fillRect(Math.round(0.57 * size), wy, winW, wh)
+      try { entry.normalMap = makeCanvasTexture(heightToNormal(flatCanvas), false) } catch (e) {}
+    } else {
+      try { entry.normalMap = makeCanvasTexture(heightToNormal(canvas), false) } catch (e) {}
+    }
     // roughnessMap：噪声驱动粗糙度变化；facade 窗玻璃区域覆盖为光滑（反射天空光）
     try {
       const rc = makeRoughnessCanvas(size, seedMap[kind])
@@ -375,7 +394,7 @@ function getSurfaceTextures(kind) {
         const rctx = rc.getContext('2d')
         const wy = Math.round((1 - 0.86) * size), wh = Math.round((0.86 - 0.42) * size)
         const winW = Math.round(0.34 * size)
-        rctx.fillStyle = 'rgb(61,61,61)' // 窗玻璃 roughness 0.24（低值=光滑）
+        rctx.fillStyle = 'rgb(18,18,18)' // 窗玻璃 roughness ~0.07（光滑反射）
         rctx.fillRect(Math.round(0.09 * size), wy, winW, wh)
         rctx.fillRect(Math.round(0.57 * size), wy, winW, wh)
       }
@@ -530,6 +549,7 @@ function buildGeometry(geometryState) {
 
 const MATERIAL_BUILDERS = {
   MeshStandardMaterial: THREE.MeshStandardMaterial,
+  MeshPhysicalMaterial: THREE.MeshPhysicalMaterial,
   MeshBasicMaterial: THREE.MeshBasicMaterial,
   MeshLambertMaterial: THREE.MeshLambertMaterial,
   MeshPhongMaterial: THREE.MeshPhongMaterial,
@@ -570,7 +590,7 @@ function displaceOrganicGeometry(geometry, kind) {
 }
 
 /**
- * 从 innerCores material 状态创建材质（Standard/Lambert/Phong 自动附加 PBR 三通道纹理）。
+ * 从 innerCores material 状态创建材质（Standard/Physical/Lambert/Phong 自动附加合适贴图）。
  * @returns {THREE.Material}
  */
 function createMaterialFromCore(materialState = {}, name = '', geometryState = null) {
@@ -588,30 +608,45 @@ function createMaterialFromCore(materialState = {}, name = '', geometryState = n
   if (materialState.side !== undefined) {
     options.side = materialState.side === 'DoubleSide' ? THREE.DoubleSide : materialState.side === 'BackSide' ? THREE.BackSide : THREE.FrontSide
   }
+  // MeshPhysicalMaterial 专属参数（玻璃/车漆等）
+  if (materialState.transmission !== undefined) options.transmission = materialState.transmission
+  if (materialState.ior !== undefined) options.ior = materialState.ior
+  if (materialState.thickness !== undefined) options.thickness = materialState.thickness
+  if (materialState.clearcoat !== undefined) options.clearcoat = materialState.clearcoat
+  if (materialState.clearcoatRoughness !== undefined) options.clearcoatRoughness = materialState.clearcoatRoughness
+  if (materialState.attenuationColor !== undefined) options.attenuationColor = materialState.attenuationColor
+  if (materialState.attenuationDistance !== undefined) options.attenuationDistance = materialState.attenuationDistance
+
   const Ctor = MATERIAL_BUILDERS[materialState.type] || THREE.MeshStandardMaterial
   const material = new Ctor(options)
 
-  // PBR 三通道附加：map + normalMap + roughnessMap（按对象名语义，玻璃/发光/透明跳过；细长柱体跳过）
-  if (Ctor === THREE.MeshStandardMaterial || Ctor === THREE.MeshLambertMaterial || Ctor === THREE.MeshPhongMaterial) {
+  // 程序化纹理附加：按对象名语义，玻璃/发光/透明/透射跳过；细长柱体跳过。
+  // - Standard/Physical：map + normalMap + roughnessMap（PBR 三通道）
+  // - Lambert：仅 map + bumpMap（不支持 normalMap/roughnessMap）
+  // - Phong：map + bumpMap + normalMap（不支持 roughnessMap，用 shininess/specular）
+  const isPBR = Ctor === THREE.MeshStandardMaterial || Ctor === THREE.MeshPhysicalMaterial
+  const isLambert = Ctor === THREE.MeshLambertMaterial
+  const isPhong = Ctor === THREE.MeshPhongMaterial
+  if ((isPBR || isLambert || isPhong) && !isSlimColumn(geometryState)) {
     const kind = inferSurfaceKind(name, materialState)
     const tex = kind ? getSurfaceTextures(kind) : null
-    if (kind && tex && !isSlimColumn(geometryState)) {
+    if (kind && tex) {
       material.map = tex.map
       material.bumpMap = tex.map
       material.bumpScale = 0.025
-      if (tex.normalMap) material.normalMap = tex.normalMap
-      if (tex.roughnessMap) {
+      if (tex.normalMap && (isPBR || isPhong)) material.normalMap = tex.normalMap
+      if (tex.roughnessMap && isPBR) {
         material.roughnessMap = tex.roughnessMap
-        material.roughness = 1
+        // Three.js 中 roughnessMap 绿色通道与 base roughness 相乘，不是覆盖。
+        // 保留用户传入的 base roughness；未指定时按材质类型给合理默认值。
+        const baseRoughness = typeof material.roughness === 'number' ? material.roughness : null
         if (kind === 'metal') {
-          // 金属表面：保留/提升金属度（拉丝与粗糙度变化由贴图表达），增强环境反射——否则 metalness 被压到
-          // 0.1 全变哑光塑料（"纸扎感"来源之一）
+          material.roughness = baseRoughness ?? 0.3
           material.metalness = Math.max(typeof material.metalness === 'number' ? material.metalness : 0.6, 0.5)
           material.envMapIntensity = 1.4
         } else {
+          material.roughness = baseRoughness ?? 0.85
           material.metalness = Math.min(material.metalness ?? 0, 0.1)
-          // 非金属（facade 幕墙/砖/混凝土等）：增强环境反射——现代幕墙玻璃反射天空明显（参考图效果），
-          // 0.9 → 1.25 让玻璃更通透、立面更有"玻璃感"
           material.envMapIntensity = 1.25
         }
       } else if (kind === 'metal') {

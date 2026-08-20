@@ -3,7 +3,7 @@
         "backgroundBlurriness": 0,
         "backgroundIntensity": 1,
         "backgroundUrls": null,
-        "environmentEnabled": false
+        "environmentEnabled": true
     },
     "perspectiveCamera": {
         "fov": 50,
@@ -23,10 +23,10 @@
     },
     "webglRenderer": {
         "outputColorSpace": "srgb",
-        "toneMapping": 0,
-        "toneMappingExposure": 1,
+        "toneMapping": 4,
+        "toneMappingExposure": 1.1,
         "shadowMap": {
-            "enabled": false,
+            "enabled": true,
             "type": 1
         },
         "color": 0,
@@ -193,20 +193,97 @@
     },
     "lightCores": [
         {
-            "name": "",
-            "type": "AmbientLight",
+            "name": "环境光",
+            "type": "HemisphereLight",
             "visible": true,
             "position": {
                 "x": 0,
                 "y": 0,
                 "z": 0
             },
-            "color": 16777215,
-            "intensity": 1,
+            "color": 14745599,
+            "groundColor": 4934475,
+            "intensity": 0.8,
             "castShadow": false,
             "layers": {
                 "mask": 1,
                 "maskString": "0"
+            }
+        },
+        {
+            "name": "主光",
+            "type": "DirectionalLight",
+            "visible": true,
+            "position": {
+                "x": 80,
+                "y": 120,
+                "z": 60
+            },
+            "color": 16777215,
+            "intensity": 1.6,
+            "castShadow": true,
+            "target": {
+                "x": 0,
+                "y": 0,
+                "z": 0
+            },
+            "shadow": {
+                "bias": -0.0001,
+                "radius": 4,
+                "mapSize": {
+                    "x": 2048,
+                    "y": 2048
+                },
+                "normalBias": 0.03,
+                "camera": {
+                    "near": 0.5,
+                    "far": 500,
+                    "left": -50,
+                    "right": 50,
+                    "top": 50,
+                    "bottom": -50
+                }
+            },
+            "layers": {
+                "mask": 1
+            }
+        },
+        {
+            "name": "补光",
+            "type": "DirectionalLight",
+            "visible": true,
+            "position": {
+                "x": -40,
+                "y": 60,
+                "z": -30
+            },
+            "color": 16777215,
+            "intensity": 0.4,
+            "castShadow": false,
+            "target": {
+                "x": 0,
+                "y": 0,
+                "z": 0
+            },
+            "shadow": {
+                "bias": 0,
+                "radius": 1,
+                "mapSize": {
+                    "x": 512,
+                    "y": 512
+                },
+                "normalBias": 0,
+                "camera": {
+                    "near": 0.5,
+                    "far": 500,
+                    "left": -5,
+                    "right": 5,
+                    "top": 5,
+                    "bottom": -5
+                }
+            },
+            "layers": {
+                "mask": 1
             }
         }
     ],
