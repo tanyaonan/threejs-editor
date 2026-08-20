@@ -58,6 +58,7 @@ const TEX_SIZE = 256
 const SURFACE_UNIT = {
   facade: 3, factoryWall: 3, brick: 1.5, concrete: 3, asphalt: 3,
   paver: 1.5, roof: 3, grass: 2, metal: 2,
+  bark: 1.2, leaf: 2,
 }
 
 /**
@@ -144,9 +145,9 @@ function drawFactoryWall(ctx, size, rand) {
   ctx.fillRect(0, size / 2, size, 5)
 }
 
-/** brick 砖墙：4 行 × 3 列错缝砖（0.5×0.375m），红褐/黄褐砖 + 浅缝 + 气孔 */
+/** brick 砖墙：4 行 × 3 列错缝砖（0.5×0.375m），浅缝 + 每砖明度差 + 气孔 */
 function drawBrick(ctx, size, rand) {
-  ctx.fillStyle = 'rgb(168,150,135)'
+  ctx.fillStyle = 'rgb(172,170,168)'
   ctx.fillRect(0, 0, size, size)
   const rows = 4, rowH = size / rows, cols = 3, colW = size / cols
   for (let r = 0; r < rows; r++) {
@@ -154,11 +155,8 @@ function drawBrick(ctx, size, rand) {
     for (let c = -1; c <= cols; c++) {
       const x = c * colW + offset + 2, y = r * rowH + 2
       const w = colW - 4, h = rowH - 4
-      // 红褐到黄褐随机：R 主导，G 中等，B 压低
-      const br = Math.round(185 + rand() * 30)
-      const bg = Math.round(110 + rand() * 35)
-      const bb = Math.round(70 + rand() * 20)
-      ctx.fillStyle = `rgb(${br},${bg},${bb})`
+      const v = Math.round(206 + rand() * 26)
+      ctx.fillStyle = `rgb(${v},${v - 1},${v - 3})`
       ctx.fillRect(x, y, w, h)
       const holes = rand() < 0.6 ? 1 : 2
       for (let k = 0; k < holes; k++) {
@@ -232,21 +230,19 @@ function drawRoof(ctx, size, rand) {
   ctx.fillRect(0, 0, 3, size)
 }
 
-/** grass 草地：带色相噪声的黄绿色草地（fbm 云斑 + 草叶亮/暗点） */
+/** grass 草地：大尺度云状明暗斑块（fbm）+ 草叶亮点/暗点 */
 function drawGrass(ctx, size) {
   const img = ctx.createImageData(size, size)
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const i = (y * size + x) * 4
       const n = fbmNoise3(x / 96, y / 96, 7.3)
+      // 参考图生态屋顶/草坪：均匀中绿偏亮 + 轻微云斑（不是暗绿噪点）
+      let v = 232 + (n - 0.5) * 30
       const r2 = hashNoise3(x | 0, y | 0, 13)
-      // 中绿偏黄基调（参考 aesthetics #5C8A3C 色系），再叠加云斑与草叶亮/暗点
-      const spot = r2 > 0.985 ? 20 : r2 < 0.012 ? -25 : 0
-      const cloud = (n - 0.5) * 30
-      img.data[i] = Math.min(255, Math.max(0, 142 + cloud + spot))     // R 偏黄
-      img.data[i + 1] = Math.min(255, Math.max(0, 188 + cloud + spot)) // G 主导
-      img.data[i + 2] = Math.min(255, Math.max(0, 72 + cloud + spot * 0.5)) // B 压低
-      img.data[i + 3] = 255
+      if (r2 > 0.985) v = 250
+      else if (r2 < 0.012) v = 198
+      img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255
     }
   }
   ctx.putImageData(img, 0, 0)
@@ -267,6 +263,63 @@ function drawMetal(ctx, size, rand) {
   ctx.putImageData(img, 0, 0)
 }
 
+/** bark 树皮：垂直主裂纹 + 横向细褶 + 痂斑（棕褐基调） */
+function drawBark(ctx, size, rand) {
+  fillNoise(ctx, size, rand, 142, 38)
+  // 垂直主裂纹（3-5 条），模拟树皮大沟壑
+  const grooves = 4 + Math.floor(rand() * 2)
+  for (let i = 0; i < grooves; i++) {
+    const x = rand() * size
+    const w = 2 + rand() * 3
+    const grad = ctx.createLinearGradient(x - w, 0, x + w, 0)
+    grad.addColorStop(0, 'rgba(0,0,0,0)')
+    grad.addColorStop(0.5, 'rgba(30,20,12,0.55)')
+    grad.addColorStop(1, 'rgba(0,0,0,0)')
+    ctx.fillStyle = grad
+    ctx.fillRect(x - w, 0, w * 2, size)
+  }
+  // 横向细褶（树皮环状褶皱）
+  for (let i = 0; i < 18; i++) {
+    const y = rand() * size
+    const h = 1 + rand() * 2
+    ctx.fillStyle = `rgba(60,40,24,${0.12 + rand() * 0.18})`
+    ctx.fillRect(0, y, size, h)
+  }
+  // 浅色斑痂
+  for (let i = 0; i < 12; i++) {
+    const x = rand() * size, y = rand() * size, r = 4 + rand() * 8
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, r)
+    grad.addColorStop(0, 'rgba(180,160,130,0.22)')
+    grad.addColorStop(1, 'rgba(180,160,130,0)')
+    ctx.fillStyle = grad
+    ctx.fillRect(x - r, y - r, r * 2, r * 2)
+  }
+}
+
+/** leaf 树叶：中叶绿底 + 深绿/黄绿斑块 + 细叶脉，模拟低多边形树冠的叶簇 */
+function drawLeaf(ctx, size, rand) {
+  const img = ctx.createImageData(size, size)
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = (y * size + x) * 4
+      const n = fbmNoise3(x / 48, y / 48, 7)
+      const m = valueNoise3(x / 12, y / 12, 19)
+      // 中叶绿底 76..110，叠加斑块变化
+      let g = 86 + (n - 0.5) * 28 + (m - 0.5) * 18
+      let r = g - 18 + (n - 0.5) * 12
+      let b = g - 42 + (m - 0.5) * 10
+      // 随机叶脉细线
+      const vein = (Math.sin((x / size) * Math.PI * 2 * 8 + y * 0.15) > 0.92) ? 1 : 0
+      if (vein) { r -= 18; g -= 22; b -= 16 }
+      img.data[i] = Math.max(0, Math.min(255, r))
+      img.data[i + 1] = Math.max(0, Math.min(255, g))
+      img.data[i + 2] = Math.max(0, Math.min(255, b))
+      img.data[i + 3] = 255
+    }
+  }
+  ctx.putImageData(img, 0, 0)
+}
+
 const SURFACE_DRAWERS = {
   facade: drawFacade,
   factoryWall: drawFactoryWall,
@@ -277,6 +330,8 @@ const SURFACE_DRAWERS = {
   roof: drawRoof,
   grass: drawGrass,
   metal: drawMetal,
+  bark: drawBark,
+  leaf: drawLeaf,
 }
 
 /** 纹理缓存：kind → { map, normalMap, roughnessMap }（全局共享） */
@@ -362,31 +417,17 @@ function getSurfaceTextures(kind) {
     const canvas = document.createElement('canvas')
     canvas.width = canvas.height = size
     const ctx = canvas.getContext('2d')
-    const seedMap = { facade: 11, factoryWall: 23, brick: 37, concrete: 41, asphalt: 53, paver: 67, roof: 71, grass: 0, metal: 83 }
+    const seedMap = { facade: 11, factoryWall: 23, brick: 37, concrete: 41, asphalt: 53, paver: 67, roof: 71, grass: 0, metal: 83, bark: 97, leaf: 101 }
     SURFACE_DRAWERS[kind](ctx, size, makeRand(seedMap[kind]))
     // 垂直受光渐变（建筑类）：顶部亮→底部暗，体积感
-    if (SHADED_KINDS.has(kind)) addVerticalShade(canvas, kind === 'facade' ? 0.14 : 0.16)
+    if (SHADED_KINDS.has(kind)) addVerticalShade(canvas, kind === 'facade' ? 0.22 : 0.16)
     const entry = {
       map: makeCanvasTexture(canvas, true),
       normalMap: null,
       roughnessMap: null,
     }
     // 法线贴图：从亮度高度场生成（写实凹凸，告别平面贴图感）
-    // facade 窗玻璃区域单独做平：避免暗玻璃被算成凹陷法线
-    if (kind === 'facade') {
-      const flatCanvas = document.createElement('canvas')
-      flatCanvas.width = flatCanvas.height = size
-      flatCanvas.getContext('2d').drawImage(canvas, 0, 0)
-      const fctx = flatCanvas.getContext('2d')
-      const wy = Math.round((1 - 0.86) * size), wh = Math.round((0.86 - 0.42) * size)
-      const winW = Math.round(0.34 * size)
-      fctx.fillStyle = 'rgb(128,128,128)'
-      fctx.fillRect(Math.round(0.09 * size), wy, winW, wh)
-      fctx.fillRect(Math.round(0.57 * size), wy, winW, wh)
-      try { entry.normalMap = makeCanvasTexture(heightToNormal(flatCanvas), false) } catch (e) {}
-    } else {
-      try { entry.normalMap = makeCanvasTexture(heightToNormal(canvas), false) } catch (e) {}
-    }
+    try { entry.normalMap = makeCanvasTexture(heightToNormal(canvas), false) } catch (e) {}
     // roughnessMap：噪声驱动粗糙度变化；facade 窗玻璃区域覆盖为光滑（反射天空光）
     try {
       const rc = makeRoughnessCanvas(size, seedMap[kind])
@@ -394,7 +435,7 @@ function getSurfaceTextures(kind) {
         const rctx = rc.getContext('2d')
         const wy = Math.round((1 - 0.86) * size), wh = Math.round((0.86 - 0.42) * size)
         const winW = Math.round(0.34 * size)
-        rctx.fillStyle = 'rgb(18,18,18)' // 窗玻璃 roughness ~0.07（光滑反射）
+        rctx.fillStyle = 'rgb(61,61,61)' // 窗玻璃 roughness 0.24（低值=光滑）
         rctx.fillRect(Math.round(0.09 * size), wy, winW, wh)
         rctx.fillRect(Math.round(0.57 * size), wy, winW, wh)
       }
@@ -408,25 +449,30 @@ function getSurfaceTextures(kind) {
 }
 
 /**
- * 按对象名与材质参数推断表面纹理类型（优先级从上到下，双端唯一）。
- * 玻璃/发光/透明/标线跳过；仅匹配"楼体部件"语义词（禁裸"楼"，防误贴窗户）。
+ * 表面纹理类型（规范化）：由 innerCores 条目 `material.surface` 显式声明，不再按对象名推断。
+ * 合法值：facade / factoryWall / brick / concrete / asphalt / paver / roof / grass / metal / bark / leaf / glass / none
+ * - `none`（或 null/缺省）= 不附加程序化纹理，渲染为纯色材质；
+ * - `glass` = 触发 MeshPhysicalMaterial 玻璃升级（透射/折射），本身无独立纹理。
+ * 未知值仅告警并忽略（不猜测、不回退旧名称匹配）。
  */
-function inferSurfaceKind(name, materialState) {
-  const n = String(name || '')
-  const type = (materialState && materialState.type) || ''
-  if (type === 'MeshBasicMaterial' || type === 'MeshNormalMaterial') return null
-  if (materialState && (materialState.transparent || (materialState.emissive && materialState.emissive !== 0))) return null
-  if (/玻璃|glass|透明|标线|黄线|斑马|文字|屏幕|铭牌|指示牌/.test(n)) return null
-  if (/楼体|主体|大厦|塔楼|幕墙|写字楼|办公楼|宿舍|住宅|公寓|研发楼|楼层|综合楼/.test(n)) return 'facade'
-  if (/厂房|车间|仓库|库房/.test(n)) return 'factoryWall'
-  if (/砖/.test(n)) return 'brick'
-  if (/屋面|屋顶|屋面板|屋脊|顶板/.test(n)) return 'roof'
-  if (/道路|路面|公路|主干道|支路|车道/.test(n)) return 'asphalt'
-  if (/人行道|广场|铺装|步道|地砖/.test(n)) return 'paver'
-  if (/草坪|草地|绿化带|绿带|绿篱|树池|花坛/.test(n)) return 'grass'
-  if (/地面|地坪|场地|停车场|路基|散水/.test(n)) return 'concrete'
-  if (/金属|钢|铁|铝|铜|管|烟囱|栏杆|护栏|灯柱|爬梯|支架|支腿|罐|塔|桶|槽|柜|机组|风机|空调外机|设备/.test(n)) return 'metal'
-  if (/墙|墙体|围墙|山墙|勒脚|女儿墙|围护|隔墙|隔断|挡墙|桥墩|柱|台阶|坡道/.test(n)) return 'concrete'
+const SURFACE_KINDS = new Set([
+  'facade', 'factoryWall', 'brick', 'concrete', 'asphalt', 'paver',
+  'roof', 'grass', 'metal', 'bark', 'leaf', 'glass', 'none',
+])
+
+/**
+ * 解析 innerCores 条目声明的表面类型（显式字段，规范化接口）。
+ * @param {object} materialState core.material（含 surface 字段）
+ * @returns {string|null} 表面类型；未声明/声明 none/非法值返回 null
+ */
+function resolveSurfaceKind(materialState) {
+  const s = materialState && materialState.surface
+  if (s === undefined || s === null || s === '') return null
+  if (s === 'none') return null
+  if (SURFACE_KINDS.has(s)) return s
+  if (typeof s === 'string') {
+    console.warn(`[scene-3d] 未知 surface 类型 "${s}"（合法值：${Array.from(SURFACE_KINDS).join('/')}），已忽略纹理附加`)
+  }
   return null
 }
 
@@ -556,30 +602,49 @@ const MATERIAL_BUILDERS = {
   MeshNormalMaterial: THREE.MeshNormalMaterial,
 }
 
-/** 有机对象类型：树冠/树叶/灌木/绿化 → leaf；云 → cloud（排除"百叶"） */
-function inferOrganicKind(name) {
-  const n = String(name || '').toLowerCase()
-  if (/云|cloud/.test(n)) return 'cloud'
-  // 树冠|树叶|灌木|绿化|叶；"冠A/冠1"缩写也算（(?<!塔)排除"塔冠"，(?=[A-Za-z0-9])要求冠后跟编号）
-  if (/树冠|树叶|灌木|绿化|(?<!百)叶|(?<!塔)冠(?=[A-Za-z0-9])/.test(n)) return 'leaf'
+/** 有机对象类型（规范化）：innerCores 条目 `organic` 显式声明——`leaf`（树冠/树叶/灌木，强噪声形变 +
+ * 面片化叶簇）、`cloud`（云，低频平缓形变）。未声明 = 不做有机形变。不再按对象名推断。 */
+function resolveOrganic(core) {
+  const o = core && core.organic
+  if (o === 'leaf' || o === 'cloud') return o
   return null
 }
 
-/** 有机形变：球体/多面体顶点沿法向噪声位移，leaf 面片化、cloud 低频平缓 */
+/** 有机形变：球体/多面体顶点沿法向噪声位移，leaf 产生低多边形叶簇、cloud 低频平缓 */
 function displaceOrganicGeometry(geometry, kind) {
   const radius = (geometry.parameters && geometry.parameters.radius) || 0.5
-  const freq = kind === 'cloud' ? 2.2 / radius : 3.2 / radius
-  const amp = kind === 'cloud' ? 0.4 : 0.55
   const pos = geometry.attributes.position
   const v = new THREE.Vector3()
+  // leaf 增强形变：基础低频决定整体轮廓，中频簇团产生大团叶簇，高频尖刺产生小叶簇边缘，
+  // 让标准球/Icosahedron 变成不规则的自然树冠，避免"几个气球叠一起"的观感。
+  const baseFreq = kind === 'cloud' ? 1.6 / radius : 2.2 / radius
+  const baseAmp = kind === 'cloud' ? 0.35 : 0.42
+  const clusterFreq = kind === 'cloud' ? 0 : 6.5 / radius
+  const clusterAmp = kind === 'cloud' ? 0 : 0.36
+  const spikeFreq = kind === 'cloud' ? 0 : 14 / radius
+  const spikeAmp = kind === 'cloud' ? 0 : 0.18
+
   for (let i = 0; i < pos.count; i++) {
     v.fromBufferAttribute(pos, i)
-    const n = fbmNoise3(v.x * freq, v.y * freq, v.z * freq)
-    v.multiplyScalar(1 + (n - 0.5) * amp)
+    const n = v.clone().normalize()
+    // 基础低频：整体膨缩（云更平缓）
+    const base = (fbmNoise3(v.x * baseFreq, v.y * baseFreq, v.z * baseFreq) - 0.5) * baseAmp
+    // 中频簇团（叶簇大团）
+    const cluster = clusterFreq
+      ? (fbmNoise3(v.x * clusterFreq + 11, v.y * clusterFreq + 11, v.z * clusterFreq + 11) - 0.5) * clusterAmp
+      : 0
+    // 高频尖刺（小叶簇边缘）
+    const spike = spikeFreq
+      ? (fbmNoise3(v.x * spikeFreq + 31, v.y * spikeFreq + 31, v.z * spikeFreq + 31) - 0.5) * spikeAmp
+      : 0
+    const offset = base + cluster + spike
+    v.addScaledVector(n, offset * radius)
     pos.setXYZ(i, v.x, v.y, v.z)
   }
   pos.needsUpdate = true
+
   if (kind === 'leaf') {
+    // 面片化：拆成独立三角面并 flatShading，产生低多边形树冠的硬边叶簇感
     const g = geometry.toNonIndexed()
     g.computeVertexNormals()
     geometry.dispose()
@@ -589,8 +654,17 @@ function displaceOrganicGeometry(geometry, kind) {
   return geometry
 }
 
+/** 判断是否为玻璃/幕墙类对象（规范化）：只读显式字段——`material.surface === 'glass'` 或
+ * `transparent` / `opacity < 0.92`（透明即玻璃语义）。不再按对象名正则匹配。 */
+function isGlassLike(name, materialState) {
+  if (materialState && materialState.surface === 'glass') return true
+  if (materialState && materialState.transparent) return true
+  if (materialState && typeof materialState.opacity === 'number' && materialState.opacity < 0.92) return true
+  return false
+}
+
 /**
- * 从 innerCores material 状态创建材质（Standard/Physical/Lambert/Phong 自动附加合适贴图）。
+ * 从 innerCores material 状态创建材质（Standard/Physical/Lambert/Phong 自动附加 PBR 三通道纹理）。
  * @returns {THREE.Material}
  */
 function createMaterialFromCore(materialState = {}, name = '', geometryState = null) {
@@ -608,56 +682,80 @@ function createMaterialFromCore(materialState = {}, name = '', geometryState = n
   if (materialState.side !== undefined) {
     options.side = materialState.side === 'DoubleSide' ? THREE.DoubleSide : materialState.side === 'BackSide' ? THREE.BackSide : THREE.FrontSide
   }
-  // MeshPhysicalMaterial 专属参数（玻璃/车漆等）
-  if (materialState.transmission !== undefined) options.transmission = materialState.transmission
-  if (materialState.ior !== undefined) options.ior = materialState.ior
-  if (materialState.thickness !== undefined) options.thickness = materialState.thickness
-  if (materialState.clearcoat !== undefined) options.clearcoat = materialState.clearcoat
-  if (materialState.clearcoatRoughness !== undefined) options.clearcoatRoughness = materialState.clearcoatRoughness
-  if (materialState.attenuationColor !== undefined) options.attenuationColor = materialState.attenuationColor
-  if (materialState.attenuationDistance !== undefined) options.attenuationDistance = materialState.attenuationDistance
 
-  const Ctor = MATERIAL_BUILDERS[materialState.type] || THREE.MeshStandardMaterial
+  // 玻璃/幕墙：强制升级为 MeshPhysicalMaterial，补透射参数（transmission + ior + thickness）
+  let Ctor = MATERIAL_BUILDERS[materialState.type] || THREE.MeshStandardMaterial
+  const glassUpgrade = Ctor !== THREE.MeshPhysicalMaterial && isGlassLike(name, materialState)
+  if (glassUpgrade) {
+    Ctor = THREE.MeshPhysicalMaterial
+    options.transparent = true
+    // opacity 保持用户值；若未给出则给 0.25（薄玻璃默认较透）
+    if (options.opacity === undefined) options.opacity = 0.25
+    options.transmission = 0.9
+    options.ior = 1.5
+    options.thickness = 0.6
+    options.attenuationColor = color
+    options.attenuationDistance = 2.5
+    options.roughness = typeof options.roughness === 'number' ? options.roughness : 0.05
+    options.metalness = 0
+  }
+
   const material = new Ctor(options)
 
-  // 程序化纹理附加：按对象名语义，玻璃/发光/透明/透射跳过；细长柱体跳过。
-  // - Standard/Physical：map + normalMap + roughnessMap（PBR 三通道）
-  // - Lambert：仅 map + bumpMap（不支持 normalMap/roughnessMap）
-  // - Phong：map + bumpMap + normalMap（不支持 roughnessMap，用 shininess/specular）
-  const isPBR = Ctor === THREE.MeshStandardMaterial || Ctor === THREE.MeshPhysicalMaterial
-  const isLambert = Ctor === THREE.MeshLambertMaterial
-  const isPhong = Ctor === THREE.MeshPhongMaterial
-  if ((isPBR || isLambert || isPhong) && !isSlimColumn(geometryState)) {
-    const kind = inferSurfaceKind(name, materialState)
+  // PBR 三通道附加：map + normalMap + roughnessMap（按 material.surface 显式声明，
+  // 玻璃/发光/透明跳过；细长柱体跳过，但 bark/leaf 例外——树干再细也需要纹理）
+  const supportsMaps = Ctor === THREE.MeshStandardMaterial || Ctor === THREE.MeshPhysicalMaterial || Ctor === THREE.MeshLambertMaterial || Ctor === THREE.MeshPhongMaterial
+  // 发光材质（指示灯/屏幕/警示灯 emissive）跳过纹理——自发光面附加贴图会糊掉光效
+  const hasEmissive = materialState.emissive !== undefined && materialState.emissive !== null && materialState.emissive !== 0
+  if (supportsMaps && !glassUpgrade && !hasEmissive) {
+    const kind = resolveSurfaceKind(materialState)
     const tex = kind ? getSurfaceTextures(kind) : null
-    if (kind && tex) {
+    const isOrganic = kind === 'bark' || kind === 'leaf'
+    if (kind && tex && (isOrganic || !isSlimColumn(geometryState))) {
       material.map = tex.map
       material.bumpMap = tex.map
-      material.bumpScale = 0.025
-      if (tex.normalMap && (isPBR || isPhong)) material.normalMap = tex.normalMap
-      if (tex.roughnessMap && isPBR) {
+      material.bumpScale = kind === 'bark' || kind === 'leaf' ? 0.045 : 0.03
+      if (tex.normalMap) {
+        material.normalMap = tex.normalMap
+        material.normalScale = new THREE.Vector2(1.4, 1.4)
+      }
+      if (tex.roughnessMap) {
         material.roughnessMap = tex.roughnessMap
-        // Three.js 中 roughnessMap 绿色通道与 base roughness 相乘，不是覆盖。
-        // 保留用户传入的 base roughness；未指定时按材质类型给合理默认值。
-        const baseRoughness = typeof material.roughness === 'number' ? material.roughness : null
+        // 基础 roughness 决定整体质感，贴图提供变化；避免统一压到 1 失去光泽层次，
+        // 也避免用户给的 0.12 让混凝土/幕墙像镜子。
+        const baseR = typeof material.roughness === 'number' ? material.roughness : 0.85
+        material.roughness = Math.min(Math.max(baseR, 0.72), 1.0)
         if (kind === 'metal') {
-          material.roughness = baseRoughness ?? 0.3
+          // 金属表面：保留/提升金属度（拉丝与粗糙度变化由贴图表达），增强环境反射——否则 metalness 被压到
+          // 0.1 全变哑光塑料（"纸扎感"来源之一）
           material.metalness = Math.max(typeof material.metalness === 'number' ? material.metalness : 0.6, 0.5)
-          material.envMapIntensity = 1.4
+          material.envMapIntensity = 1.5
         } else {
-          material.roughness = baseRoughness ?? 0.85
-          material.metalness = Math.min(material.metalness ?? 0, 0.1)
-          material.envMapIntensity = 1.25
+          material.metalness = Math.min(material.metalness ?? 0, 0.05)
+          // 非金属（facade 幕墙/砖/混凝土等）：增强环境反射——现代幕墙玻璃反射天空明显（参考图效果），
+          // 1.25 → 1.5 让玻璃更通透、立面更有"玻璃感"
+          material.envMapIntensity = 1.5
         }
       } else if (kind === 'metal') {
-        material.envMapIntensity = 1.25
+        material.envMapIntensity = 1.5
       }
-      // 楼体/草地同名阵列颜色微抖动 ±4%
-      if (kind === 'facade' || kind === 'grass') {
+      // 关键：facade/factoryWall/brick/concrete/roof/paver/asphalt 等建筑/环境纹理
+      // 被用户高饱和颜色（如橙红/蓝灰）强烈染色后会变成"塑料色"，丢失纹理细节。
+      // 将基础色向白色大幅淡化，让程序化纹理的图案与本色成为主导，仅保留轻微色调。
+      if (kind === 'facade' || kind === 'factoryWall' || kind === 'brick' || kind === 'concrete' || kind === 'roof' || kind === 'paver' || kind === 'asphalt') {
+        material.color.lerp(new THREE.Color(0xffffff), 0.78)
+      }
+      // 楼体/草地/树叶同名阵列颜色微抖动 ±4%
+      if (kind === 'facade' || kind === 'grass' || kind === 'leaf') {
         material.color.multiplyScalar(1 + (nameJitter(name) - 0.5) * 0.08)
       }
+      // 树皮适当压暗并提高粗糙度
+      if (kind === 'bark') {
+        material.roughness = 0.96
+        material.color.multiplyScalar(0.92)
+      }
       // 叶簇面片化
-      if (inferOrganicKind(name) === 'leaf') {
+      if (kind === 'leaf') {
         material.flatShading = true
       }
       material.needsUpdate = true
@@ -704,11 +802,18 @@ function createInnerCoreMesh(core) {
   const geometryState = core.geometry || {}
   let geometry = buildGeometry(geometryState)
   if (!geometry) return null
-  const organic = inferOrganicKind(core.name)
+  const organic = resolveOrganic(core)
   if (organic && (geometry.type === 'SphereGeometry' || geometry.type === 'IcosahedronGeometry')) {
+    // 树冠/叶簇：标准球面太光滑像气球，改用 IcosahedronGeometry（detail=1，80 面）
+    // 再做有机形变，产生低多边形硬边叶簇感，告别"塑料树冠"。
+    if (organic === 'leaf' && geometry.type === 'SphereGeometry') {
+      const radius = geometryState.parameters.radius || 0.5
+      geometry.dispose()
+      geometry = new THREE.IcosahedronGeometry(radius, 1)
+    }
     geometry = displaceOrganicGeometry(geometry, organic)
   } else {
-    const kind = inferSurfaceKind(core.name, core.material)
+    const kind = resolveSurfaceKind(core.material)
     if (kind) {
       const unit = SURFACE_UNIT[kind]
       const p = geometryState.parameters || {}
@@ -723,16 +828,19 @@ function createInnerCoreMesh(core) {
   }
   let material = createMaterialFromCore(core.material, core.name, geometryState)
   // facade 楼体顶/底去窗：Box 六面同贴幕墙纹理会把窗户贴到楼顶/楼底（俯视穿帮），
-  // 用材质数组把 ±y 面换成同色无纹理材质（稍深呈屋面色）
+  // 用材质数组把 ±y 面换成屋面纹理（无窗、略深），既去窗又保留真实屋面材质。
   if (
     geometryState.type === 'BoxGeometry' && geometry.type === 'BoxGeometry' &&
-    inferSurfaceKind(core.name, core.material) === 'facade'
+    resolveSurfaceKind(core.material) === 'facade'
   ) {
     const capMat = material.clone()
-    capMat.map = null
-    capMat.bumpMap = null
-    capMat.roughnessMap = null
-    capMat.normalMap = null
+    const roofTex = getSurfaceTextures('roof')
+    capMat.map = roofTex.map
+    capMat.bumpMap = roofTex.map
+    capMat.bumpScale = 0.03
+    capMat.normalMap = roofTex.normalMap
+    capMat.normalScale = new THREE.Vector2(1.2, 1.2)
+    capMat.roughnessMap = roofTex.roughnessMap
     capMat.roughness = 0.9
     capMat.metalness = 0
     capMat.color.multiplyScalar(0.9)
@@ -742,8 +850,14 @@ function createInnerCoreMesh(core) {
   const mesh = new THREE.Mesh(geometry, material)
   mesh.name = typeof core.name === 'string' && core.name ? core.name : geometryState.type
   if (core.visible === false) mesh.visible = false
-  mesh.castShadow = !/云|cloud/i.test(mesh.name)
+  // 语义字段（显式声明，配置自包含——不依赖对象命名）：
+  // - castShadow: false 关闭投影（云等蓬松体积）；默认 true
+  // - excludeFromFrame: true 不参与取景包围盒（配景：树/路灯/车辆/云/围栏/标线…）
+  // - autoExtend: true 主地面自动延展至画面外（大面积铺底；隐含排除取景）
+  mesh.castShadow = core.castShadow !== false
   mesh.receiveShadow = true
+  mesh.userData.excludeFromFrame = core.excludeFromFrame === true
+  mesh.userData.autoExtend = core.autoExtend === true
   applyTransform3(mesh, core)
   return mesh
 }
@@ -775,10 +889,11 @@ function tuneShadowLights(scene, box) {
 export {
   THREE,
   SURFACE_UNIT,
+  SURFACE_KINDS,
   ROUND_BOX_MAX,
   getSurfaceTextures,
-  inferSurfaceKind,
-  inferOrganicKind,
+  resolveSurfaceKind,
+  resolveOrganic,
   nameJitter,
   buildGeometry,
   createMaterialFromCore,

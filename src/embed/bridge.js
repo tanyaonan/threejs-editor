@@ -24,8 +24,8 @@ import {
   SURFACE_UNIT,
   ROUND_BOX_MAX,
   getSurfaceTextures,
-  inferSurfaceKind,
-  inferOrganicKind,
+  resolveSurfaceKind,
+  resolveOrganic,
   nameJitter,
   applyBoxWorldUV,
   applyPlaneWorldUV,
@@ -55,6 +55,34 @@ let active = false // rup:set-active 记录
 let lastSceneState = null
 let lastConfigState = null
 let watchTimer = null
+
+/**
+ * 显式语义映射表（纹理/有机形变规范化）：从场景文档 innerCores 提取 name → { surface, organic }。
+ * 设计器侧操作的是 three.js Material 实例（surface 字段不随实例走），
+ * 遍历时按对象 name 回查本表——不再按名称正则推断表面类型（与 viewer 端 resolveSurfaceKind 一致）。
+ */
+let semanticMap = null // Map<name, { surface?: string, organic?: string }>
+
+function buildSemanticMap(doc) {
+  semanticMap = new Map()
+  try {
+    const state = toState(doc)
+    const cores = Array.isArray(state && state.innerCores) ? state.innerCores : []
+    for (const c of cores) {
+      const name = c && typeof c.name === 'string' && c.name ? c.name : null
+      if (!name) continue
+      const entry = {}
+      if (c.material && typeof c.material === 'object' && typeof c.material.surface === 'string') {
+        entry.surface = c.material.surface
+      }
+      if (typeof c.organic === 'string') entry.organic = c.organic
+      if (c.excludeFromFrame === true) entry.excludeFromFrame = true
+      if (c.autoExtend === true) entry.autoExtend = true
+      if (c.castShadow === false) entry.castShadow = false
+      if (Object.keys(entry).length) semanticMap.set(name, entry)
+    }
+  } catch (e) { /* 映射表构建失败不阻断场景加载 */ }
+}
 let changeTimer = null
 let embedTitle = '' // 宿主传入的页面标题（嵌入模式顶栏显示）
 let titleListener = null // 标题变化回调（index.vue 绑定响应式 ref）
@@ -332,7 +360,8 @@ function applySceneEnvironment(editor, state) {
   } catch (e) {}
 }
 
-/** 场景加载后遍历材质附加结构化程序化纹理（仅未带纹理的 Standard/Physical/Lambert/Phong，玻璃/发光跳过） */
+/** 场景加载后遍历材质附加结构化程序化纹理（仅未带纹理的 Standard/Physical/Lambert/Phong；
+ * 表面类型读场景文档显式声明 material.surface（semanticMap），不再按名称推断；玻璃/发光/透明跳过） */
 function fixSceneMaterials(editor) {
   try {
     editor.scene.traverse((o) => {
@@ -343,14 +372,14 @@ function fixSceneMaterials(editor) {
       const isPhong = mat.type === 'MeshPhongMaterial'
       if (!isPBR && !isLambert && !isPhong) return
       if (mat.map || mat.alphaMap) return
-      // inferSurfaceKind 期望纯字段 JSON，但这里 mat 是 three.js Material 实例
-      // （emissive 是 Color 对象非 0），必须先扁平化为纯字段，否则会被误判为发光材质跳过纹理
-      const matState = {
-        type: mat.type,
-        transparent: !!mat.transparent,
-        emissive: mat.emissive && typeof mat.emissive === 'object' && typeof mat.emissive.getHex === 'function' ? mat.emissive.getHex() : mat.emissive
-      }
-      const kind = inferSurfaceKind(o.name, matState)
+      // 发光材质（指示灯/屏幕 emissive）跳过纹理——自发光面附加贴图会糊掉光效（与 viewer 一致）
+      if (mat.emissive && typeof mat.emissive.getHex === 'function' && mat.emissive.getHex() !== 0) return
+      // 玻璃（surface: 'glass' 或 transparent）跳过纹理（与 viewer 一致：升级 MeshPhysicalMaterial 处理）
+      const surfEntry = semanticMap ? semanticMap.get(o.name) : null
+      if (surfEntry && surfEntry.surface === 'glass') return
+      if (mat.transparent) return
+      // 显式声明 surface 才附加纹理：resolveSurfaceKind 只读 materialState.surface，不做名称推断
+      const kind = resolveSurfaceKind({ surface: surfEntry ? surfEntry.surface : undefined })
       const tex = kind ? getSurfaceTextures(kind) : null
       // 细长柱体（灯柱/树干/旗杆/栏杆）：纹理在细柱上压缩成横条纹（条纹材质根因），且真实细柱是纯色漆面——跳过纹理
       const geoState = o.geometry ? { type: o.geometry.type, parameters: o.geometry.parameters } : null
@@ -416,12 +445,18 @@ function fixSceneMaterials(editor) {
   } catch (e) {}
 }
 
-/** 对象阴影（与 viewer 一致，写实阴影四要素之物体侧）：全部对象投影 + 接收，云不投影避免糊满地面 */
-function fixSceneShadows(editor) {
+/** 语义字段同步（与 viewer 一致，配置自包含——不依赖对象命名）：
+ * 按场景文档声明回填 excludeFromFrame / autoExtend（取景用）与 castShadow（阴影用）。
+ * 未声明的对象：参与取景、可投影（云等写 castShadow: false 关闭）。 */
+function applySceneSemantics(editor) {
   try {
     editor.scene.traverse((o) => {
+      if (!o.isMesh && !o.isGroup) return
+      const e = semanticMap ? semanticMap.get(o.name) : null
+      o.userData.excludeFromFrame = !!(e && (e.excludeFromFrame || e.autoExtend))
+      o.userData.autoExtend = !!(e && e.autoExtend)
       if (o.isMesh) {
-        o.castShadow = !/云|cloud/i.test(o.name || '')
+        o.castShadow = !(e && e.castShadow === false)
         o.receiveShadow = true
       }
     })
@@ -449,12 +484,14 @@ function roundSceneBoxes(editor) {
   } catch (e) {}
 }
 
-/** 有机形变（与 viewer 一致）：树冠/叶/灌木/云的球体顶点噪声位移为不规则有机轮廓（写实感，双端同源） */
+/** 有机形变（与 viewer 一致）：场景文档显式声明 organic（leaf/cloud）的球体顶点噪声位移
+ * 为不规则有机轮廓（写实感，双端同源）；不再按对象名推断。 */
 function fixSceneOrganic(editor) {
   try {
     editor.scene.traverse((o) => {
       if (!o.isMesh || !o.geometry) return
-      const kind = inferOrganicKind(o.name)
+      const entry = semanticMap ? semanticMap.get(o.name) : null
+      const kind = resolveOrganic({ organic: entry ? entry.organic : undefined })
       if (!kind) return
       if (o.geometry.type !== 'SphereGeometry' && o.geometry.type !== 'IcosahedronGeometry') return
       o.userData.origGeometry = o.geometry // 保留原始球体，saveSceneEdit 前换回（防止 BufferGeometry 泄漏到 JSON）
@@ -466,10 +503,6 @@ function fixSceneOrganic(editor) {
     })
   } catch (e) {}
 }
-
-/** 基底层排除（与 scene-3d viewer 一致）：地面/道路/树/路灯等大面积铺底或配景不参与取景包围盒——
- * 否则巨大地面会把包围盒撑爆、取景距离极远，模型在视口中渺小（"显示不全"） */
-const FRAME_EXCLUDE_RE = /云|cloud|地面|地坪|地板|场地|道路|公路|路面|人行道|停车场|主干道|主路|支路|车道|标线|中线|黄线|斑马|绿化带|绿带|围栏|护栏|围墙|树|路灯|灯柱|车辆|汽车/i
 
 /** 阴影质量调优（与 viewer 一致）：castShadow 的平行光/聚光灯——2048 贴图、normalBias 防阴影痤疮、
  * shadow camera 范围按主体包围盒自适应（默认 ±5 的阴影相机对园区场景会把阴影裁成碎块） */
@@ -497,7 +530,7 @@ function tuneShadowLights(editor, box) {
 }
 
 /** 场景自动取景：相机对准场景包围盒中心（与 scene-3d viewer 同公式，两侧初始视角一致）。
- * 基底层不参与包围盒——取景只框主体群。 */
+ * 配景（userData.excludeFromFrame/autoExtend，由场景文档显式声明）不参与包围盒——取景只框主体群。 */
 function centerAndFrameScene(editor) {
   try {
     const scene = editor.scene
@@ -505,8 +538,28 @@ function centerAndFrameScene(editor) {
     if (!scene || !camera) return
     const box = new THREE.Box3()
     let has = false
+    // gizmo 判定：向上回溯祖先，若任何祖先是 TransformControls 则视为 gizmo 子件（不被 isHelper 覆盖）
+    const isGizmoDescendant = (obj) => {
+      let p = obj
+      while (p && p !== scene) {
+        if (p.isTransformControls || (p.constructor && p.constructor.name === 'TransformControls')) return true
+        p = p.parent
+      }
+      return false
+    }
     scene.traverse((o) => {
-      if (o.isMesh && o.visible && !o.isHelper && o.name && !FRAME_EXCLUDE_RE.test(o.name)) {
+      if (o.isMesh && o.visible && !o.isHelper && !isGizmoDescendant(o) && !o.userData.excludeFromFrame && !o.userData.autoExtend) {
+        // 兜底：position 或 matrixWorld 含 NaN/Infinity/极端值的对象不参与取景——
+        // 三个实测触发条件：① three-edit-cores 加载大场景时 transform 累积误差（194 对象曾触发），
+        // ② 隐藏 helper/坐标轴 gizmo 位置异常，③ 异步纹理加载期间对象 matrix 未及时更新
+        const p = o.position
+        if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return
+        if (Math.abs(p.x) > 1e5 || Math.abs(p.y) > 1e5 || Math.abs(p.z) > 1e5) return
+        try { o.updateMatrixWorld() } catch (e) { return }
+        const m = o.matrixWorld.elements
+        for (let i = 0; i < 12; i++) {
+          if (!Number.isFinite(m[i]) || Math.abs(m[i]) > 1e6) return
+        }
         box.expandByObject(o)
         has = true
       }
@@ -532,12 +585,18 @@ function centerAndFrameScene(editor) {
     // 视角按内容高宽比自适应（与 viewer 一致）：内容越高视角越平、越平视角越陡；下限 0.55 保证顶边射线落地
     const flat = Math.max(size.x, size.z, 1)
     const yFactor = Math.min(0.85, Math.max(0.55, 0.55 + (size.y / flat) * 0.4))
-    camera.position.set(center.x + d * 0.72, center.y + d * yFactor, center.z + d * 0.72)
+    // 兜底：center 必须 finite 且 |coord| < 1e5，否则相机位置飞至 NaN/极远（视锥里只有空气 → 画布空）
+    const safe = (Number.isFinite(center.x) && Number.isFinite(center.y) && Number.isFinite(center.z) &&
+                  Math.abs(center.x) < 1e5 && Math.abs(center.y) < 1e5 && Math.abs(center.z) < 1e5)
+    const cx = safe ? center.x : 0
+    const cy = safe ? center.y : 1
+    const cz = safe ? center.z : 0
+    camera.position.set(cx + d * 0.72, cy + d * yFactor, cz + d * 0.72)
     if (editor.controls) {
-      editor.controls.target.set(center.x, center.y, center.z)
+      editor.controls.target.set(cx, cy, cz)
       editor.controls.update()
     }
-    camera.lookAt(center.x, center.y, center.z)
+    camera.lookAt(cx, cy, cz)
     tuneShadowLights(editor, box)
     return camera.position.clone()
   } catch (e) {
@@ -568,7 +627,44 @@ function fixRendererQuality(editor, state) {
   } catch (e) {}
 }
 
-/** 场景增强链（全部幂等）：灯光/材质纹理/阴影/圆角/有机形变。
+/** 兜底修复：场景背景/环境纹理 colorSpace 非法导致 WebGL 渲染崩溃。
+ * three-edit-cores 加载环境背景（CubeTextureLoader / TextureLoader.load 异步加载，加载完成
+ * 才挂到 scene.environment/background 或材质 map）时可能未设置 colorSpace，
+ * three r152+ 的 WebGLBackground.addToRenderList 会调用 ColorManagement.getTransfer(colorSpace)，
+ * colorSpace 为 undefined/不在注册表时 `spaces[colorSpace].transfer` 抛 TypeError，整个场景不渲染
+ * （症状：场景渲染约 1 秒——异步贴图加载完成——后画面消失/停住）。
+ * 合法 colorSpace：NoColorSpace / SRGBColorSpace / LinearSRGBColorSpace 等（ColorManagement.spaces 内）。
+ * 这里把非法值兜底为 NoColorSpace（three 默认，永远合法，视觉无感）。
+ * 已检查过的纹理用 WeakSet 缓存（每帧调用开销可忽略）：新挂上的纹理（异步加载完成）不在
+ * 缓存中，下一帧渲染前必被检查——渲染循环每帧调用，覆盖任意时点的异步纹理。 */
+const checkedTextureColorSpaces = new WeakSet()
+function fixSceneTextureColorSpaces(editor) {
+  try {
+    const scene = editor.scene
+    if (!scene || !THREE.ColorManagement || !THREE.ColorManagement.spaces) return
+    const fix = (tex) => {
+      if (!tex || typeof tex !== 'object') return
+      if (checkedTextureColorSpaces.has(tex)) return
+      const cs = tex.colorSpace
+      if (typeof cs !== 'string' || !THREE.ColorManagement.spaces[cs]) {
+        tex.colorSpace = THREE.NoColorSpace
+      }
+      checkedTextureColorSpaces.add(tex)
+    }
+    fix(scene.background)
+    fix(scene.environment)
+    scene.traverse((o) => {
+      if (!o.isMesh || !o.material) return
+      const mats = Array.isArray(o.material) ? o.material : [o.material]
+      for (const mat of mats) {
+        if (mat && mat.map) fix(mat.map)
+        if (mat && mat.envMap) fix(mat.envMap)
+      }
+    })
+  } catch (e) { /* 兜底修复失败不阻断 */ }
+}
+
+/** 场景增强链（全部幂等）：灯光/材质纹理/阴影/圆角/有机形变/语义字段/纹理 colorSpace 兜底。
  * resetEditorStorage 通过响应式 store 创建场景对象，Mesh 在渲染循环中才真正就绪——
  * applyScene 里同步调用可能遍历不到对象（材质/圆角全部失效），
  * 必须由 scheduleFrameScene 在对象就绪后补跑一次。 */
@@ -576,13 +672,15 @@ function applyEnhancements(editor) {
   if (!editor) return
   fixSceneLights(editor)
   fixSceneMaterials(editor)
-  fixSceneShadows(editor)
+  applySceneSemantics(editor)
   roundSceneBoxes(editor)
   fixSceneOrganic(editor)
+  fixSceneTextureColorSpaces(editor)
 }
 
 function applyScene(doc) {
   pendingScene = { sceneDocument: doc, version: (pendingScene?.version || 0) + 1 }
+  buildSemanticMap(doc)
   if (threeEditor && toState(doc)) {
     const state = normalizeSceneState(toState(doc))
     threeEditor.resetEditorStorage(state)
@@ -651,6 +749,10 @@ function startEmbedRenderLoop() {
     embedRenderRaf = requestAnimationFrame(tick)
     if (!threeEditor || !threeEditor.renderer || !threeEditor.scene || !threeEditor.camera) return
     try {
+      // 每帧渲染前兜底：three-edit-cores 异步加载（TextureLoader.load 等）完成的纹理
+      // 可能在任意帧挂上 scene.environment/background 或材质 map，colorSpace 非法即崩——
+      // 渲染前修正（WeakSet 缓存，已检查的不重复处理，开销可忽略）
+      fixSceneTextureColorSpaces(threeEditor)
       if (threeEditor.controls) threeEditor.controls.update()
       const t = threeEditor.controls && threeEditor.controls.target
       if (t) threeEditor.camera.lookAt(t.x, t.y, t.z)
@@ -687,6 +789,25 @@ function wrapScene() {
       if (!Array.isArray(state.innerCores)) state.innerCores = []
       state.innerCores.push(...strippedTubeGeometries)
     } catch (e) {}
+  }
+  // 语义字段回填（材质丢失根因修复）：three-edit-cores 序列化器只输出核心字段，
+  // 会丢弃 material.surface / organic / excludeFromFrame / autoExtend / castShadow——
+  // 设计器回写后页面重新渲染时 surface 缺失 → 纹理不附加（材质"没了"）。
+  // 按 semanticMap（加载时从场景文档提取的 name→语义快照）按名回填，保证回写无损。
+  if (semanticMap && semanticMap.size && Array.isArray(state.innerCores)) {
+    for (const c of state.innerCores) {
+      if (!c || typeof c.name !== 'string') continue
+      const entry = semanticMap.get(c.name)
+      if (!entry) continue
+      if (entry.surface) {
+        if (!c.material || typeof c.material !== 'object') c.material = {}
+        if (!c.material.surface) c.material.surface = entry.surface
+      }
+      if (entry.organic && c.organic === undefined) c.organic = entry.organic
+      if (entry.excludeFromFrame && c.excludeFromFrame !== true) c.excludeFromFrame = true
+      if (entry.autoExtend && c.autoExtend !== true) c.autoExtend = true
+      if (entry.castShadow === false && c.castShadow !== false) c.castShadow = false
+    }
   }
   // 颜色归一化（兜底：即使 saveSceneEdit 包装未生效，输出也保持 sRGB 十进制）
   normalizeSerializedColors(state)
@@ -881,6 +1002,18 @@ export function onEmbedTitleChange(callback) {
 export function setupEmbedEditor(editor) {
   if (!IS_EMBED) return
   threeEditor = editor
+  // 渲染前兜底：three-edit-cores 异步纹理（TextureLoader.load 等）加载完成挂上
+  // scene.environment/background 或材质 map 时 colorSpace 可能非法，three r152+ 渲染即崩
+  // （getTransfer TypeError，症状：场景渲染约 1 秒后消失/停住）——包装 render，
+  // 让任意渲染驱动（three-edit-cores 响应式循环 / 嵌入循环）渲染前都先修正（WeakSet 缓存，开销可忽略）
+  const rdr = editor.renderer
+  if (rdr && typeof rdr.render === 'function') {
+    const origRender = rdr.render.bind(rdr)
+    rdr.render = (scene, camera) => {
+      try { fixSceneTextureColorSpaces(editor) } catch (e) {}
+      return origRender(scene, camera)
+    }
+  }
   // 核心 saveSceneEdit 会 detach transformControls（保存时清理），导致用户选中被取消；
   // 包装保存函数：保存后恢复选中对象（对象仍在场景中时），保证回写/序列化不打断编辑
   const tc = editor.transformControls
