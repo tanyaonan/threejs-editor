@@ -198,7 +198,7 @@ import { ElButton, ElSelect, ElOption, ElMessage, ElIcon, ElMessageBox } from 'e
 import { Pointer, Position, RefreshRight, ZoomIn, Remove, Refresh } from '@element-plus/icons-vue'
 import LeftPanel from './left.vue'
 import RightPanel from './right.vue'
-import { isEmbedMode, initEmbedBridge, setupEmbedEditor, getEmbedTitle, onEmbedTitleChange } from '../embed/bridge'
+import { isEmbedMode, initEmbedBridge, setupEmbedEditor, getEmbedTitle, onEmbedTitleChange, snapshotUndo, snapshotRedo } from '../embed/bridge'
 import { useRoute, useRouter } from 'vue-router'
 import { setIndexDB } from './indexDb'
 import { getObjectViews, createGsapAnimation, restoreHistoryHandler } from './lib'
@@ -220,6 +220,33 @@ const router = useRouter()
 
 // iframe 嵌入模式（?embed=1）：初始化宿主消息桥
 if (isEmbedMode()) onMounted(() => initEmbedBridge())
+
+// 嵌入模式：捕获级拦截 Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y，阻止核心 keydown（走 core 内部
+// handlerHistory，仅记录移动）触发，统一改走快照历史（覆盖删除/视角等所有操作，与宿主按钮一致）。
+// 捕获阶段 + stopImmediatePropagation：在 document 冒泡监听（核心绑定）之前接管。
+if (isEmbedMode()) {
+  onMounted(() => {
+    const onKeyCapture = (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      // 焦点在输入控件时放行（保留文本编辑自身的撤销行为）
+      const el = document.activeElement
+      const tag = el?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || el?.isContentEditable) return
+      const key = e.key?.toLowerCase()
+      if (key === 'z') {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        if (e.shiftKey) snapshotRedo()
+        else snapshotUndo()
+      } else if (key === 'y') {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        snapshotRedo()
+      }
+    }
+    document.addEventListener('keydown', onKeyCapture, true)
+  })
+}
 
 // 嵌入模式顶栏标题：取宿主 rup:init 传入的页面标题，并跟随后续变化
 const embedTitle = ref('')
@@ -472,10 +499,14 @@ const doExport = () => {
 }
 
 const handleUndo = () => {
+  // 嵌入模式：走场景文档快照历史（覆盖移动/删除/视角等所有操作，与宿主 rup:undo 一致）；
+  // 非嵌入模式保留核心历史栈（transformControls 拖拽）
+  if (isEmbedMode()) return snapshotUndo()
   if (threeEditor) restoreHistoryHandler(threeEditor.handler.handlerHistory, 'z')
 }
 
 const handleRedo = () => {
+  if (isEmbedMode()) return snapshotRedo()
   if (threeEditor) restoreHistoryHandler(threeEditor.handler.handlerHistory, 'y')
 }
 </script>

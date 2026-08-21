@@ -13,7 +13,6 @@
  *
  * 启用方式: URL 携带 ?embed=1（query 可位于 location.search 或 hash 内）
  */
-import { restoreHistoryHandler } from '../editor/lib'
 import templateJson from '../editor/template.json'
 import * as THREE from 'three'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
@@ -56,6 +55,22 @@ let active = false // rup:set-active 记录
 let lastSceneState = null
 let lastConfigState = null
 let watchTimer = null
+
+/**
+ * 场景文档快照历史（源码变更即记录，替代 three-edit-cores 的 handlerHistory）。
+ *
+ * three-edit-cores 的 handlerHistory 只在 transformControls 拖拽（移动/旋转/缩放）时
+ * 通过 drag_change_callback 记录 { object, transform }，删除物体、相机视角变更等操作
+ * 不入历史，导致无法撤销/重做。这里改为以"场景文档快照"为历史单元：
+ * 轮询检测到场景/配置变化后，防抖记录 wrapScene() 快照（含相机视角）；撤销/重做时
+ * 恢复到对应快照，从而覆盖移动、删除、视角、属性等所有编辑操作。
+ */
+const SNAPSHOT_CAPACITY = 50 // 快照历史容量上限
+const SNAPSHOT_RECORD_DEBOUNCE = 500 // 连续变化（拖拽）的合并防抖窗口（ms）
+const snapshotStack = { list: [], index: -1 } // list 每项 { doc, camera }；index 指向当前状态
+let snapshotRecordTimer = null // 快照记录防抖定时器
+let restoringSnapshot = false // 正在恢复快照：抑制重复记录
+let pendingCameraRestore = null // 待恢复的相机视角（position + controls.target）
 
 /**
  * 显式语义映射表（纹理/有机形变规范化）：从场景文档 innerCores 提取 name → { surface, organic }。
@@ -768,23 +783,48 @@ function scheduleFrameScene(retry = 0) {
       scheduleFrameScene(retry + 1)
       return
     }
-    framedCameraPos = centerAndFrameScene(threeEditor)
+    const isSnapshotRestore = !!pendingCameraRestore
+    if (isSnapshotRestore) {
+      // 快照恢复：应用快照相机视角（自动取景会重置视角，撤销/重做必须保持快照视角），
+      // 并重置轮询基线，避免把"恢复动作本身"当作新变化重复上报/记录
+      applyCameraRestore(pendingCameraRestore)
+      pendingCameraRestore = null
+      restoringSnapshot = false
+      framedCameraPos = null
+      try {
+        const h = threeEditor?.handler?.handlerHistory
+        lastSceneState = h && typeof h === 'object'
+          ? `${h.list?.length ?? 0}:${h.index ?? 0}:${h.reList?.length ?? 0}`
+          : null
+        lastConfigState = getConfigSnapshot()
+      } catch (e) {}
+      // 恢复后主动上报场景文档，让宿主源码与撤销/重做后的场景保持一致
+      scheduleSceneChange()
+      postHistoryState()
+    } else {
+      framedCameraPos = centerAndFrameScene(threeEditor)
+      // 首次场景就绪：建立基线快照（撤销回退的起点）
+      ensureBaselineSnapshot()
+    }
     // 启动嵌入模式专属渲染循环：three-edit-cores 内置循环在嵌入环境下未正确初始化相机方向
     // （camera.lookAt 未被触发），每帧 render 输出空白。手动循环覆盖：每帧 controls.update
     // 让相机看向 target，再 renderer.render 输出到 canvas
     startEmbedRenderLoop()
-    setTimeout(() => {
-      if (!threeEditor || !threeEditor.camera) return
-      const p = threeEditor.camera.position
-      const moved = framedCameraPos && (
-        Math.abs(p.x - framedCameraPos.x) > 0.01 ||
-        Math.abs(p.y - framedCameraPos.y) > 0.01 ||
-        Math.abs(p.z - framedCameraPos.z) > 0.01
-      )
-      if (!framedCameraPos || (!moved && countMeshes(threeEditor) > 0)) {
-        centerAndFrameScene(threeEditor)
-      }
-    }, 800)
+    // 二次兜底取景：仅在非快照恢复时执行（恢复后视角已由快照固定，不再次取景覆盖）
+    if (!isSnapshotRestore) {
+      setTimeout(() => {
+        if (!threeEditor || !threeEditor.camera) return
+        const p = threeEditor.camera.position
+        const moved = framedCameraPos && (
+          Math.abs(p.x - framedCameraPos.x) > 0.01 ||
+          Math.abs(p.y - framedCameraPos.y) > 0.01 ||
+          Math.abs(p.z - framedCameraPos.z) > 0.01
+        )
+        if (!framedCameraPos || (!moved && countMeshes(threeEditor) > 0)) {
+          centerAndFrameScene(threeEditor)
+        }
+      }, 800)
+    }
   }, 200)
 }
 
@@ -910,18 +950,15 @@ function buildSceneTree(node, depth = 0) {
   return items
 }
 
-/** 当前撤销/重做可用状态（读编辑器历史栈，边界与 restoreHistoryHandler 一致）：
- * 撤销用 list.at(index)、重做用 reList.at(index+1)（index 为负，从栈尾向前索引）——
- * 只用 list/reList 长度判断会漏掉 index 指针已到栈顶/栈底，导致"可一直点撤销/重做"。 */
+/** 当前撤销/重做可用状态（基于场景文档快照栈）：
+ * 撤销用 index > 0（存在比当前更早的快照）、重做用 index < list.length - 1（存在更新快照）。
+ * 索引语义与快照栈一致：list[index] 即当前状态。 */
 function getHistoryCanState() {
-  const history = threeEditor?.handler?.handlerHistory
-  if (!history || typeof history !== 'object') return { canUndo: false, canRedo: false }
-  const list = Array.isArray(history.list) ? history.list : []
-  const reList = Array.isArray(history.reList) ? history.reList : []
-  const index = typeof history.index === 'number' ? history.index : -1
+  const list = snapshotStack.list
+  if (!list.length) return { canUndo: false, canRedo: false }
   return {
-    canUndo: !!list.at(index),
-    canRedo: index !== -1 && !!reList.at(index + 1),
+    canUndo: snapshotStack.index > 0,
+    canRedo: snapshotStack.index >= 0 && snapshotStack.index < list.length - 1,
   }
 }
 
@@ -930,16 +967,155 @@ function postHistoryState() {
   post('rup:history-change', getHistoryCanState())
 }
 
-function handleUndoRedo(isRedo) {
-  const handlerHistory = threeEditor?.handler?.handlerHistory
-  if (handlerHistory) {
-    restoreHistoryHandler(handlerHistory, isRedo ? 'y' : 'z')
-    // 执行后立即上报，不等轮询（保证撤销/重做按钮即时反馈）
-    postHistoryState()
-  } else {
-    // 核心未暴露历史栈，回告宿主不支持
-    post('rup:history-change', { canUndo: false, canRedo: false, unsupported: true })
+/** 供编辑器内部（index.vue）撤销/重做按钮调用：走快照历史，与宿主 rup:undo/rup:redo 一致 */
+export function snapshotUndo() {
+  handleUndoRedo(false)
+}
+export function snapshotRedo() {
+  handleUndoRedo(true)
+}
+
+/** 采集当前场景文档快照（wrapScene 输出 + 相机视角）。
+ * doc 深拷贝（JSON 往返）：saveSceneEdit 返回的对象可能引用场景内对象，
+ * 后续编辑会污染已记录的快照，导致撤销/重做回退失效。 */
+function takeSnapshot() {
+  if (!threeEditor) return null
+  try {
+    const doc = wrapScene()
+    const cam = threeEditor.camera
+    const controls = threeEditor.controls
+    let camera = null
+    if (cam) {
+      camera = {
+        position: { x: cam.position.x, y: cam.position.y, z: cam.position.z },
+        target: controls?.target ? { x: controls.target.x, y: controls.target.y, z: controls.target.z } : null,
+      }
+    }
+    return { doc: JSON.parse(JSON.stringify(doc)), camera }
+  } catch (e) {
+    return null
   }
+}
+
+/** 快照内容是否一致（防抖窗口内无实质变化时跳过记录）。
+ * 同时比较场景文档与相机视角：视角变更（仅相机移动）时 doc 可能不变，需靠 camera 区分。 */
+function snapshotsEqual(a, b) {
+  if (!a || !b) return false
+  try {
+    if (JSON.stringify(a.doc) !== JSON.stringify(b.doc)) return false
+    return JSON.stringify(a.camera) === JSON.stringify(b.camera)
+  } catch (e) {
+    return false
+  }
+}
+
+/** 建立初始基线快照（首次场景就绪后记录，作为撤销回退的起点）。
+ * 场景对象未就绪（异步创建中）时延迟重试（上限 10 次，空场景不再等），
+ * 确保基线取到完整场景。 */
+let baselineRetries = 0
+function ensureBaselineSnapshot() {
+  if (snapshotStack.list.length > 0) return
+  if (!threeEditor) return
+  if (countMeshes(threeEditor) === 0 && baselineRetries < 10) {
+    baselineRetries++
+    setTimeout(ensureBaselineSnapshot, 300)
+    return
+  }
+  baselineRetries = 0
+  const snap = takeSnapshot()
+  if (snap) {
+    snapshotStack.list.push(snap)
+    snapshotStack.index = 0
+    postHistoryState()
+  }
+}
+
+/** 场景变化后防抖记录快照：连续操作（拖拽）合并为一份，变化停止后落栈 */
+function scheduleSnapshotRecord() {
+  if (restoringSnapshot) return
+  clearTimeout(snapshotRecordTimer)
+  snapshotRecordTimer = setTimeout(() => {
+    snapshotRecordTimer = null
+    if (restoringSnapshot) return
+    recordSnapshot()
+  }, SNAPSHOT_RECORD_DEBOUNCE)
+}
+
+/** 记录一份快照（截断 redo 分支，容量上限裁剪）。
+ * 基线未建立时先建基线（避免把"操作后的状态"误当历史起点）。 */
+function recordSnapshot() {
+  if (restoringSnapshot || !threeEditor) return
+  if (snapshotStack.list.length === 0) {
+    ensureBaselineSnapshot()
+    return
+  }
+  const snap = takeSnapshot()
+  if (!snap) return
+  const current = snapshotStack.list[snapshotStack.index]
+  if (current && snapshotsEqual(current, snap)) return
+  snapshotStack.list = snapshotStack.list.slice(0, snapshotStack.index + 1)
+  snapshotStack.list.push(snap)
+  snapshotStack.index = snapshotStack.list.length - 1
+  if (snapshotStack.list.length > SNAPSHOT_CAPACITY) {
+    snapshotStack.list.shift()
+    snapshotStack.index = snapshotStack.list.length - 1
+  }
+  postHistoryState()
+}
+
+/** 恢复快照相机视角（跳过自动取景，保持撤销/重做后视角一致） */
+function applyCameraRestore(camera) {
+  try {
+    if (!camera) return
+    const cam = threeEditor?.camera
+    const controls = threeEditor?.controls
+    if (!cam) return
+    if (camera.position) cam.position.set(camera.position.x, camera.position.y, camera.position.z)
+    if (controls?.target && camera.target) {
+      controls.target.set(camera.target.x, camera.target.y, camera.target.z)
+      controls.update()
+    }
+    cam.updateProjectionMatrix()
+    const t = controls?.target || camera.position
+    if (t) cam.lookAt(t.x, t.y, t.z)
+  } catch (e) {}
+}
+
+/** 撤销/重做：从快照栈取目标快照恢复场景与视角（替代核心 handlerHistory，覆盖删除/视角等所有操作） */
+function handleUndoRedo(isRedo) {
+  const list = snapshotStack.list
+  if (!list.length) return
+  const targetIndex = isRedo ? snapshotStack.index + 1 : snapshotStack.index - 1
+  if (targetIndex < 0 || targetIndex >= list.length) return
+  snapshotStack.index = targetIndex
+  const snap = list[targetIndex]
+  if (!snap) return
+  restoringSnapshot = true
+  pendingCameraRestore = snap.camera
+  try {
+    applyScene(snap.doc)
+  } catch (e) {
+    restoringSnapshot = false
+    pendingCameraRestore = null
+  }
+  // 执行后立即上报，不等轮询（保证撤销/重做按钮即时反馈）
+  postHistoryState()
+}
+
+/** 重置快照历史栈（宿主下发新场景时调用）：清空历史与轮询基线，
+ * 之后 scheduleFrameScene/首次轮询会按新场景重建基线，撤销/重做从新场景重新开始。 */
+function resetSnapshotHistory() {
+  snapshotStack.list = []
+  snapshotStack.index = -1
+  lastSceneState = null
+  lastConfigState = null
+  baselineRetries = 0
+  if (snapshotRecordTimer) {
+    clearTimeout(snapshotRecordTimer)
+    snapshotRecordTimer = null
+  }
+  restoringSnapshot = false
+  pendingCameraRestore = null
 }
 
 function onMessage(event) {
@@ -947,6 +1123,7 @@ function onMessage(event) {
   if (!msg || typeof msg.type !== 'string') return
   switch (msg.type) {
     case 'rup:init':
+      resetSnapshotHistory()
       applyScene(msg.payload?.sceneDocument)
       // 设计器保持自身默认主题（暗色），不随宿主 init 的 theme 强制切换；
       // 需要切换主题由宿主显式发送 rup:set-theme
@@ -954,6 +1131,7 @@ function onMessage(event) {
       active = !!msg.payload?.active
       break
     case 'rup:set-scene':
+      resetSnapshotHistory()
       applyScene(msg.payload?.sceneDocument)
       break
     case 'rup:get-scene':
@@ -1041,12 +1219,19 @@ function startSceneWatch() {
         const histChanged = histState !== null && histState !== lastSceneState
         lastSceneState = histState
         lastConfigState = configState
-        // 首次轮询仅建立基线，不触发上报
-        if (!isFirstSnapshot) {
-          scheduleSceneChange()
-          // 历史栈变化（编辑/撤销/重做）时同步撤销重做按钮状态
-          if (histChanged) postHistoryState()
+        // 首次轮询：建立基线快照（撤销回退的起点），不触发上报
+        if (isFirstSnapshot) {
+          ensureBaselineSnapshot()
+          return
         }
+        // 快照恢复期间：跳过上报与记录（恢复动作本身不应作为新变化），
+        // 恢复完成后由 scheduleFrameScene 恢复分支统一 scheduleSceneChange + postHistoryState
+        if (restoringSnapshot) return
+        scheduleSceneChange()
+        // 历史栈变化（编辑/撤销/重做）时同步撤销重做按钮状态
+        if (histChanged) postHistoryState()
+        // 场景/配置变化（移动/删除/视角/属性等）即记录快照历史
+        scheduleSnapshotRecord()
       }
     } catch (e) {}
   }, SCENE_WATCH_INTERVAL)
@@ -1156,4 +1341,9 @@ export function setupEmbedEditor(editor) {
   const readyState = getHistoryCanState()
   post('rup:ready', { canUndo: readyState.canUndo, canRedo: readyState.canRedo })
   startSceneWatch()
+  // 场景就绪后建立基线快照（撤销回退的起点）。resetEditorStorage 异步创建对象，
+  // 延迟至取景完成后记录；scheduleFrameScene 正常分支也兜底调用，此处保证链路完整。
+  setTimeout(() => {
+    ensureBaselineSnapshot()
+  }, 1200)
 }
