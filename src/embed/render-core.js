@@ -675,6 +675,11 @@ function createMaterialFromCore(materialState = {}, name = '', geometryState = n
   if (materialState.transparent !== undefined) options.transparent = materialState.transparent
   if (materialState.opacity !== undefined) options.opacity = materialState.opacity
   if (materialState.wireframe !== undefined) options.wireframe = materialState.wireframe
+  // flatShading（每面法线/硬边刻面，源自 claw.fbx 三角剖分 + per-face normal 建模技巧）：
+  // 对 Cylinder/Cone/Sphere/Torus 等曲面几何显式声明后，平滑过渡变为可见棱面刻面——
+  // 现代游戏低模写实的硬边质感（Box 法线本就是平面，无视觉差异；近立方体小 Box 的
+  // 自动圆角依赖平滑法线，刻意追求刻面的对象才写 flatShading: true）
+  if (materialState.flatShading !== undefined) options.flatShading = materialState.flatShading
   if (materialState.emissive !== undefined && materialState.emissive !== null) {
     options.emissive = materialState.emissive
     if (materialState.emissiveIntensity !== undefined) options.emissiveIntensity = materialState.emissiveIntensity

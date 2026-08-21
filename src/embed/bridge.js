@@ -73,8 +73,10 @@ function buildSemanticMap(doc) {
       const name = c && typeof c.name === 'string' && c.name ? c.name : null
       if (!name) continue
       const entry = {}
-      if (c.material && typeof c.material === 'object' && typeof c.material.surface === 'string') {
-        entry.surface = c.material.surface
+      if (c.material && typeof c.material === 'object') {
+        if (typeof c.material.surface === 'string') entry.surface = c.material.surface
+        // 硬边刻面（与 render-core createMaterialFromCore 一致）：显式声明 material.flatShading 的对象加载后保持可见棱面
+        if (c.material.flatShading === true) entry.flatShading = true
       }
       if (typeof c.organic === 'string') entry.organic = c.organic
       if (c.excludeFromFrame === true) entry.excludeFromFrame = true
@@ -399,6 +401,9 @@ function fixSceneMaterials(editor) {
       const isLambert = mat.type === 'MeshLambertMaterial'
       const isPhong = mat.type === 'MeshPhongMaterial'
       if (!isPBR && !isLambert && !isPhong) return
+      // 硬边刻面（与 render-core createMaterialFromCore 一致）：显式声明 material.flatShading 的工业机械件加载后保持可见棱面
+      const fsEntry = semanticMap ? semanticMap.get(o.name) : null
+      if (fsEntry && fsEntry.flatShading === true) mat.flatShading = true
       if (mat.map || mat.alphaMap) return
       // 发光材质（指示灯/屏幕 emissive）跳过纹理——自发光面附加贴图会糊掉光效（与 viewer 一致）
       if (mat.emissive && typeof mat.emissive.getHex === 'function' && mat.emissive.getHex() !== 0) return
@@ -848,6 +853,10 @@ function wrapScene() {
         if (!c.material || typeof c.material !== 'object') c.material = {}
         if (!c.material.surface) c.material.surface = entry.surface
       }
+      if (entry.flatShading) {
+        if (!c.material || typeof c.material !== 'object') c.material = {}
+        if (c.material.flatShading !== true) c.material.flatShading = true
+      }
       if (entry.organic && c.organic === undefined) c.organic = entry.organic
       if (entry.excludeFromFrame && c.excludeFromFrame !== true) c.excludeFromFrame = true
       if (entry.autoExtend && c.autoExtend !== true) c.autoExtend = true
@@ -901,10 +910,32 @@ function buildSceneTree(node, depth = 0) {
   return items
 }
 
+/** 当前撤销/重做可用状态（读编辑器历史栈，边界与 restoreHistoryHandler 一致）：
+ * 撤销用 list.at(index)、重做用 reList.at(index+1)（index 为负，从栈尾向前索引）——
+ * 只用 list/reList 长度判断会漏掉 index 指针已到栈顶/栈底，导致"可一直点撤销/重做"。 */
+function getHistoryCanState() {
+  const history = threeEditor?.handler?.handlerHistory
+  if (!history || typeof history !== 'object') return { canUndo: false, canRedo: false }
+  const list = Array.isArray(history.list) ? history.list : []
+  const reList = Array.isArray(history.reList) ? history.reList : []
+  const index = typeof history.index === 'number' ? history.index : -1
+  return {
+    canUndo: !!list.at(index),
+    canRedo: index !== -1 && !!reList.at(index + 1),
+  }
+}
+
+/** 主动上报撤销/重做状态（宿主据此启停工具栏按钮） */
+function postHistoryState() {
+  post('rup:history-change', getHistoryCanState())
+}
+
 function handleUndoRedo(isRedo) {
   const handlerHistory = threeEditor?.handler?.handlerHistory
   if (handlerHistory) {
     restoreHistoryHandler(handlerHistory, isRedo ? 'y' : 'z')
+    // 执行后立即上报，不等轮询（保证撤销/重做按钮即时反馈）
+    postHistoryState()
   } else {
     // 核心未暴露历史栈，回告宿主不支持
     post('rup:history-change', { canUndo: false, canRedo: false, unsupported: true })
@@ -1007,10 +1038,15 @@ function startSceneWatch() {
         (configState !== null && configState !== lastConfigState)
       if (changed) {
         const isFirstSnapshot = lastSceneState === null
+        const histChanged = histState !== null && histState !== lastSceneState
         lastSceneState = histState
         lastConfigState = configState
         // 首次轮询仅建立基线，不触发上报
-        if (!isFirstSnapshot) scheduleSceneChange()
+        if (!isFirstSnapshot) {
+          scheduleSceneChange()
+          // 历史栈变化（编辑/撤销/重做）时同步撤销重做按钮状态
+          if (histChanged) postHistoryState()
+        }
       }
     } catch (e) {}
   }, SCENE_WATCH_INTERVAL)
@@ -1116,6 +1152,8 @@ export function setupEmbedEditor(editor) {
     scheduleFrameScene()
     appliedVersion = pendingScene.version
   }
-  post('rup:ready', { canUndo: false, canRedo: false })
+  // rup:ready 上报真实撤销/重做状态（宿主据此初始启停按钮）
+  const readyState = getHistoryCanState()
+  post('rup:ready', { canUndo: readyState.canUndo, canRedo: readyState.canRedo })
   startSceneWatch()
 }
